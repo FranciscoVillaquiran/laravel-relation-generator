@@ -1,0 +1,27 @@
+{
+    "name": "franciscovillaquiran/laravel-relation-generator",
+    "description": "Automation of models, routes, and controllers via commands.",
+    "type": "library",
+    "require": {
+        "illuminate/support": "^10.0"
+    },
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Franciscovillaquiran\\LaravelRelationGenerator\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Francisco Villaquiran"
+        }
+    ],
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Franciscovillaquiran\\LaravelRelationGenerator\\RelationGeneratorServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable"
+}
