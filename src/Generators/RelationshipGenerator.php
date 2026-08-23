@@ -8,12 +8,47 @@ class RelationshipGenerator
 {
     public function generate(RelationDefinition $definition, string $modelsPath): array
     {
+        if ($definition->cardinality === '1:1') {
+            return $this->generateOneToOne($definition, $modelsPath);
+        }
+
         if ($definition->cardinality === '1:N') {
             return $this->generateOneToMany($definition, $modelsPath);
         }
+
+        if ($definition->cardinality === 'N:M') {
+            return $this->generateManyToMany($definition, $modelsPath);
+        }
+
         throw new \RuntimeException(
             "Cardinality {$definition->cardinality} is not implemented yet."
         );
+    }
+
+    private function generateOneToOne(
+        RelationDefinition $definition,
+        string $modelsPath
+    ): array {
+        [$modelAPath, $modelBPath] = $this->modelPaths($definition, $modelsPath);
+
+        $relationA = $this->lowerFirst($definition->modelB);
+        $relationB = $this->lowerFirst($definition->modelA);
+
+        if ($this->foreignTableIs($definition, $definition->modelB)) {
+            $methodA = $this->buildHasOneMethod($relationA, $definition->modelB);
+            $methodB = $this->buildBelongsToMethod($relationB, $definition->modelA);
+        } else {
+            $methodA = $this->buildBelongsToMethod($relationA, $definition->modelB);
+            $methodB = $this->buildHasOneMethod($relationB, $definition->modelA);
+        }
+
+        $this->addMethod($modelAPath, $methodA);
+        $this->addMethod($modelBPath, $methodB);
+
+        return [
+            'relationA' => $relationA,
+            'relationB' => $relationB,
+        ];
     }
 
     private function generateOneToMany(
@@ -23,20 +58,7 @@ class RelationshipGenerator
         $modelA = $definition->modelA;
         $modelB = $definition->modelB;
 
-        $modelAPath = $modelsPath . DIRECTORY_SEPARATOR . $modelA . '.php';
-        $modelBPath = $modelsPath . DIRECTORY_SEPARATOR . $modelB . '.php';
-
-        if (!file_exists($modelAPath)) {
-            throw new \RuntimeException(
-                "Model {$modelA} not found."
-            );
-        }
-
-        if (!file_exists($modelBPath)) {
-            throw new \RuntimeException(
-                "Model {$modelB} not found."
-            );
-        }
+        [$modelAPath, $modelBPath] = $this->modelPaths($definition, $modelsPath);
 
         $relationA = $this->pluralize(
             $this->lowerFirst($modelB)
@@ -44,20 +66,92 @@ class RelationshipGenerator
 
         $relationB = $this->lowerFirst($modelA);
 
+        if ($this->foreignTableIs($definition, $modelB)) {
+            $methodA = $this->buildHasManyMethod($relationA, $modelB);
+            $methodB = $this->buildBelongsToMethod($relationB, $modelA);
+        } else {
+            $methodA = $this->buildBelongsToMethod($relationA, $modelB);
+            $methodB = $this->buildHasManyMethod($relationB, $modelA);
+        }
+
+        $this->addMethod($modelAPath, $methodA);
+        $this->addMethod($modelBPath, $methodB);
+
+        return [
+            'relationA' => $relationA,
+            'relationB' => $relationB,
+        ];
+    }
+
+    private function generateManyToMany(
+        RelationDefinition $definition,
+        string $modelsPath
+    ): array {
+        [$modelAPath, $modelBPath] = $this->modelPaths($definition, $modelsPath);
+
+        if (!$definition->pivotTable) {
+            throw new \InvalidArgumentException(
+                'A pivot table is required for N:M relationships.'
+            );
+        }
+
+        $relationA = $this->pluralize($this->lowerFirst($definition->modelB));
+        $relationB = $this->pluralize($this->lowerFirst($definition->modelA));
+
         $this->addMethod(
             $modelAPath,
-            $this->buildHasManyMethod($relationA, $modelB)
+            $this->buildBelongsToManyMethod(
+                $relationA,
+                $definition->modelB,
+                $definition->pivotTable
+            )
         );
 
         $this->addMethod(
             $modelBPath,
-            $this->buildBelongsToMethod($relationB, $modelA)
+            $this->buildBelongsToManyMethod(
+                $relationB,
+                $definition->modelA,
+                $definition->pivotTable
+            )
         );
 
         return [
             'relationA' => $relationA,
             'relationB' => $relationB,
         ];
+    }
+
+    private function modelPaths(
+        RelationDefinition $definition,
+        string $modelsPath
+    ): array {
+        $paths = [
+            $modelsPath . DIRECTORY_SEPARATOR . $definition->modelA . '.php',
+            $modelsPath . DIRECTORY_SEPARATOR . $definition->modelB . '.php',
+        ];
+
+        foreach ($paths as $index => $path) {
+            if (!file_exists($path)) {
+                $model = $index === 0 ? $definition->modelA : $definition->modelB;
+
+                throw new \RuntimeException("Model {$model} not found.");
+            }
+        }
+
+        return $paths;
+    }
+
+    private function foreignTableIs(
+        RelationDefinition $definition,
+        string $model
+    ): bool {
+        $foreignTable = trim((string) $definition->foreignTable);
+        $modelTable = $this->pluralize(
+            strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $model))
+        );
+
+        return $foreignTable === $model || $foreignTable === $modelTable;
     }
 
     private function buildHasManyMethod(
@@ -71,7 +165,33 @@ class RelationshipGenerator
         return \$this->hasMany('App\\\\Models\\\\{$relatedModel}');
     }
 PHP;
+    }
 
+    private function buildHasOneMethod(
+        string $relationName,
+        string $relatedModel
+    ): string {
+        return <<<PHP
+
+    public function {$relationName}()
+    {
+        return \$this->hasOne('App\\\\Models\\\\{$relatedModel}');
+    }
+PHP;
+    }
+
+    private function buildBelongsToManyMethod(
+        string $relationName,
+        string $relatedModel,
+        string $pivotTable
+    ): string {
+        return <<<PHP
+
+    public function {$relationName}()
+    {
+        return \$this->belongsToMany('App\\\\Models\\\\{$relatedModel}', '{$pivotTable}');
+    }
+PHP;
     }
 
     private function buildBelongsToMethod(

@@ -48,10 +48,7 @@ class RelationMakeCommand extends Command
         $this->newLine();
 
         $foreignTable = null;
-        $foreignKey = null;
         $pivotTable = null;
-        $foreignKeyA = null;
-        $foreignKeyB = null;
 
         if ($cardinality === '1:1' || $cardinality === '1:N') {
 
