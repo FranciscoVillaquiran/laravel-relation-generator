@@ -6,6 +6,34 @@ use Franciscovillaquiran\LaravelRelationGenerator\Relations\RelationDefinition;
 
 class RelationshipGenerator
 {
+    public function relationNames(RelationDefinition $definition): array
+    {
+        if ($definition->cardinality === '1:1') {
+            return [
+                'relationA' => $this->lowerFirst($definition->modelB),
+                'relationB' => $this->lowerFirst($definition->modelA),
+            ];
+        }
+
+        if ($definition->cardinality === '1:N') {
+            return [
+                'relationA' => $this->pluralize($this->lowerFirst($definition->modelB)),
+                'relationB' => $this->lowerFirst($definition->modelA),
+            ];
+        }
+
+        if ($definition->cardinality === 'N:M') {
+            return [
+                'relationA' => $this->pluralize($this->lowerFirst($definition->modelB)),
+                'relationB' => $this->pluralize($this->lowerFirst($definition->modelA)),
+            ];
+        }
+
+        throw new \RuntimeException(
+            "Cardinality {$definition->cardinality} is not implemented yet."
+        );
+    }
+
     public function generate(RelationDefinition $definition, string $modelsPath): array
     {
         if ($definition->cardinality === '1:1') {
@@ -31,8 +59,9 @@ class RelationshipGenerator
     ): array {
         [$modelAPath, $modelBPath] = $this->modelPaths($definition, $modelsPath);
 
-        $relationA = $this->lowerFirst($definition->modelB);
-        $relationB = $this->lowerFirst($definition->modelA);
+        $relations = $this->relationNames($definition);
+        $relationA = $relations['relationA'];
+        $relationB = $relations['relationB'];
 
         if ($this->foreignTableIs($definition, $definition->modelB)) {
             $methodA = $this->buildHasOneMethod($relationA, $definition->modelB);
@@ -60,11 +89,9 @@ class RelationshipGenerator
 
         [$modelAPath, $modelBPath] = $this->modelPaths($definition, $modelsPath);
 
-        $relationA = $this->pluralize(
-            $this->lowerFirst($modelB)
-        );
-
-        $relationB = $this->lowerFirst($modelA);
+        $relations = $this->relationNames($definition);
+        $relationA = $relations['relationA'];
+        $relationB = $relations['relationB'];
 
         if ($this->foreignTableIs($definition, $modelB)) {
             $methodA = $this->buildHasManyMethod($relationA, $modelB);
@@ -95,8 +122,9 @@ class RelationshipGenerator
             );
         }
 
-        $relationA = $this->pluralize($this->lowerFirst($definition->modelB));
-        $relationB = $this->pluralize($this->lowerFirst($definition->modelA));
+        $relations = $this->relationNames($definition);
+        $relationA = $relations['relationA'];
+        $relationB = $relations['relationB'];
 
         $this->addMethod(
             $modelAPath,

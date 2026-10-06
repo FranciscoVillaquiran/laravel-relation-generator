@@ -1,6 +1,6 @@
 <?php
 
-namespace FranciscoVillaquiran\LaravelRelationGenerator\Console\Commands;
+namespace Franciscovillaquiran\LaravelRelationGenerator\Console\Commands;
 
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\RouteGenerator;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\QueryGenerator;
@@ -20,7 +20,7 @@ class RelationMakeCommand extends Command
     /**
      * The console command description.
      */
-    protected $description = 'Generate Eloquent relationships, queries and routes';
+    protected $description = 'Generate selected Eloquent relationships, fillables, queries and routes';
 
     /**
      * Execute the console command.
@@ -31,9 +31,22 @@ class RelationMakeCommand extends Command
         $modelB = $this->argument('modelB');
         $cardinality = $this->argument('cardinality');
 
-        if (!in_array($cardinality, ['1:1', '1:N', 'N:M'])) {
+        if (!in_array($cardinality, ['1:1', '1:N', 'N:M'], true)) {
             $this->error('Invalid cardinality.');
-            $this->line('Allowd: 1:1, 1:N, N:M');
+            $this->line('Allowed: 1:1, 1:N, N:M');
+
+            return self::FAILURE;
+        }
+
+        $selected = $this->parseGenerationSelection(
+            (string) $this->ask(
+                '¿Qué deseas generar? Escribe "todo" o una lista separada por comas: relacion, fillable, consultas, rutas',
+                'todo'
+            )
+        );
+
+        if ($selected === null) {
+            $this->error('Selección no válida. Usa: todo, relacion, fillable, consultas, rutas.');
 
             return self::FAILURE;
         }
@@ -50,122 +63,156 @@ class RelationMakeCommand extends Command
         $foreignTable = null;
         $pivotTable = null;
 
-        if ($cardinality === '1:1' || $cardinality === '1:N') {
+        if (in_array('relationship', $selected, true)) {
+            if ($cardinality === '1:1' || $cardinality === '1:N') {
+                $foreignTable = $this->ask(
+                    '¿Qué tabla contiene la clave foránea?'
+                );
 
-        $foreignTable = $this->ask(
-            '¿Que tabla contiene la clave foranea?'
-            );
+                if (!is_string($foreignTable) || trim($foreignTable) === '') {
+                    $this->error('La tabla que contiene la clave foránea es obligatoria.');
 
-        $this->newLine();
+                    return self::FAILURE;
+                }
 
-        $this->info('Relationship information:');
+                $this->line("Foreign Table: {$foreignTable}");
+            }
 
-        $this->line("Foreign Table: {$foreignTable}");
+            if ($cardinality === 'N:M') {
+                $pivotTable = $this->ask('¿Cuál es el nombre de la tabla pivote?');
+
+                if (!is_string($pivotTable) || trim($pivotTable) === '') {
+                    $this->error('El nombre de la tabla pivote es obligatorio.');
+
+                    return self::FAILURE;
+                }
+
+                $this->line("Pivot Table: {$pivotTable}");
+            }
+        }
 
         $definition = new RelationDefinition(
             modelA: $modelA,
             modelB: $modelB,
             cardinality: $cardinality,
             foreignTable: $foreignTable,
-        );
-        }
-
-        if ($cardinality === 'N:M') {
-            $pivotTable = $this->ask(
-                '¿Cuál es el nombre de la tabla pivote?'
-            );
-
-            $this->newLine();
-
-            $this->info('Pivot information:');
-
-            $this->line("Pivot Table: {$pivotTable}");
-
-            $definition = new RelationDefinition(
-            modelA: $modelA,
-            modelB: $modelB,
-            cardinality: $cardinality,
             pivotTable: $pivotTable,
-            );
+        );
+
+        $migrationPathA = null;
+        $migrationPathB = null;
+        if (in_array('fillable', $selected, true)) {
+            $migrationPathA = $this->findMigration($modelA);
+            $migrationPathB = $this->findMigration($modelB);
+
+            if (!$migrationPathA) {
+                $this->error("Migration for model {$modelA} not found.");
+
+                return self::FAILURE;
+            }
+
+            if (!$migrationPathB) {
+                $this->error("Migration for model {$modelB} not found.");
+
+                return self::FAILURE;
+            }
         }
 
         $this->newLine();
 
         $generator = new RelationshipGenerator();
-
-        $relations = $generator->generate(
-            $definition,
-            app_path('Models')
-        );
-
-        $this->newLine();
-        $this->info('Relationship generated successfully.');
-
-        $migrationReader = new MigrationReader();
-
-        $migrationPathA = $this->findMigration($modelA);
-        $migrationPathB = $this->findMigration($modelB);
-
-        if (!$migrationPathA) {
-            $this->error(
-                "Migration for model {$modelA} not found."
-            );
-            return self::FAILURE;
+        if (in_array('relationship', $selected, true)) {
+            $generator->generate($definition, app_path('Models'));
+            $this->info('Relationship generated successfully.');
         }
 
-        if (!$migrationPathB) {
-            $this->error(
-                "Migration for model {$modelB} not found."
+        if (in_array('fillable', $selected, true)) {
+            $migrationReader = new MigrationReader();
+            $fillableGenerator = new FillableGenerator();
+
+            $fillableGenerator->generate(
+                app_path("Models/{$modelA}.php"),
+                $migrationReader->getColumns($migrationPathA)
             );
-            return self::FAILURE;
+
+            $fillableGenerator->generate(
+                app_path("Models/{$modelB}.php"),
+                $migrationReader->getColumns($migrationPathB)
+            );
+
+            $this->info('$fillable generated');
         }
 
-        $columnsA = $migrationReader->getColumns($migrationPathA);
-        $columnsB = $migrationReader->getColumns($migrationPathB);
+        $relations = $generator->relationNames($definition);
+        if (in_array('queries', $selected, true)) {
+            $queryGenerator = new QueryGenerator();
+            $queryGenerator->generate(
+                app_path('Http/Controllers/ConsultasController.php'),
+                $modelA,
+                $modelB,
+                $relations['relationA'],
+                $relations['relationB']
+            );
+            $this->info('ConsultasController generated.');
 
+            if (!in_array('relationship', $selected, true)) {
+                $this->warn('Las consultas esperan que esas relaciones ya estén definidas en los modelos.');
+            }
+        }
 
-        $fillableGenerator = new FillableGenerator();
+        if (in_array('routes', $selected, true)) {
+            $routeGenerator = new RouteGenerator();
+            $routeGenerator->generate(
+                base_path('routes/web.php'),
+                $modelA,
+                $modelB
+            );
+            $this->info('Routes generated.');
 
-        $fillableGenerator->generate(
-            app_path("Models/{$modelA}.php"),
-            $columnsA
-        );
-
-        $fillableGenerator->generate(
-            app_path("Models/{$modelB}.php"),
-            $columnsB
-        );
-
-        $this->info('$fillable generated');
-
-        $this->newLine();
-
-        $queryGenerator = new QueryGenerator();
-
-        $queryGenerator->generate(
-            app_path('Http/Controllers/ConsultasController.php'),
-            $modelA,
-            $modelB,
-            $relations['relationA'],
-            $relations['relationB']
-        );
-        $this->info('ConsultasController generated.');
-
-        $routeGenerator = new RouteGenerator();
-
-        $routeGenerator->generate(
-            base_path('routes/web.php'),
-            $modelA,
-            $modelB
-        );
-
-        $this->info('Routes generated.');
+            if (!in_array('queries', $selected, true)) {
+                $this->warn('Las rutas esperan que los métodos de consulta ya existan en ConsultasController.');
+            }
+        }
 
         $this->newLine();
 
         $this->info('Relation Generation completed successfully.');
 
         return self::SUCCESS;
+    }
+
+    private function parseGenerationSelection(string $selection): ?array
+    {
+        $names = [
+            'relacion' => 'relationship',
+            'fillable' => 'fillable',
+            'consultas' => 'queries',
+            'rutas' => 'routes',
+        ];
+
+        $choices = array_values(array_filter(array_map(
+            static fn (string $choice): string => strtolower(trim($choice)),
+            explode(',', $selection)
+        )));
+
+        if (count($choices) === 1 && $choices[0] === 'todo') {
+            return ['relationship', 'fillable', 'queries', 'routes'];
+        }
+
+        if ($choices === [] || in_array('todo', $choices, true)) {
+            return null;
+        }
+
+        $selected = [];
+        foreach ($choices as $choice) {
+            if (!isset($names[$choice])) {
+                return null;
+            }
+
+            $selected[] = $names[$choice];
+        }
+
+        return array_values(array_unique($selected));
     }
 
     private function findMigration(string $model): ?string
