@@ -10,6 +10,8 @@ class RelationDefinition
         public string $cardinality,
         public ?string $foreignTable = null,
         public ?string $pivotTable = null,
+        public ?string $modelATable = null,
+        public ?string $modelBTable = null,
     ) {
     }
 }

@@ -20,7 +20,7 @@ After entering the command, choose `todo` (the default) to generate all supporte
 elements, or enter a comma-separated selection:
 
 - `relacion`: relationship methods on both models
-- `fillable`: `$fillable` properties read from each model's migration
+- `fillable`: `$fillable` properties generated from the structural schema
 - `consultas`: query methods in `ConsultasController`
 - `rutas`: routes in `routes/web.php`
 
@@ -45,6 +45,11 @@ Run the self-contained reader tests with:
 ```bash
 php tests/run.php
 ```
+
+`relation:make` uses the structural schema for relationship and fillable
+generation. The Eloquent/SQLite integration test is available as
+`php tests/eloquent_integration.php <path-to-vendor/autoload.php>` when
+`illuminate/database` and PDO SQLite are installed.
 
 ## Project documentation
 

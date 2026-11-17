@@ -9,6 +9,7 @@ use Franciscovillaquiran\LaravelRelationGenerator\Generators\MigrationReader;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\FillableGenerator;
 use Franciscovillaquiran\LaravelRelationGenerator\Relations\RelationDefinition;
 use Illuminate\Console\Command;
+use Illuminate\Support\Str;
 
 class RelationMakeCommand extends Command
 {
@@ -60,90 +61,57 @@ class RelationMakeCommand extends Command
 
         $this->newLine();
 
-        $foreignTable = null;
-        $pivotTable = null;
-
-        if (in_array('relationship', $selected, true)) {
-            if ($cardinality === '1:1' || $cardinality === '1:N') {
-                $foreignTable = $this->ask(
-                    '¿Qué tabla contiene la clave foránea?'
-                );
-
-                if (!is_string($foreignTable) || trim($foreignTable) === '') {
-                    $this->error('La tabla que contiene la clave foránea es obligatoria.');
-
-                    return self::FAILURE;
-                }
-
-                $this->line("Foreign Table: {$foreignTable}");
-            }
-
-            if ($cardinality === 'N:M') {
-                $pivotTable = $this->ask('¿Cuál es el nombre de la tabla pivote?');
-
-                if (!is_string($pivotTable) || trim($pivotTable) === '') {
-                    $this->error('El nombre de la tabla pivote es obligatorio.');
-
-                    return self::FAILURE;
-                }
-
-                $this->line("Pivot Table: {$pivotTable}");
-            }
-        }
+        $needsSchema = in_array('relationship', $selected, true)
+            || in_array('fillable', $selected, true);
+        $schema = $needsSchema
+            ? (new MigrationReader())->analyze(database_path('migrations'))
+            : null;
 
         $definition = new RelationDefinition(
             modelA: $modelA,
             modelB: $modelB,
             cardinality: $cardinality,
-            foreignTable: $foreignTable,
-            pivotTable: $pivotTable,
+            modelATable: $needsSchema ? $this->modelTable($modelA) : null,
+            modelBTable: $needsSchema ? $this->modelTable($modelB) : null,
         );
 
-        $migrationPathA = null;
-        $migrationPathB = null;
         if (in_array('fillable', $selected, true)) {
-            $migrationPathA = $this->findMigration($modelA);
-            $migrationPathB = $this->findMigration($modelB);
-
-            if (!$migrationPathA) {
-                $this->error("Migration for model {$modelA} not found.");
-
-                return self::FAILURE;
-            }
-
-            if (!$migrationPathB) {
-                $this->error("Migration for model {$modelB} not found.");
-
-                return self::FAILURE;
-            }
+            $this->assertSchemaTable($schema, $definition->modelATable, $modelA);
+            $this->assertSchemaTable($schema, $definition->modelBTable, $modelB);
         }
 
         $this->newLine();
 
         $generator = new RelationshipGenerator();
+        $generatedRelations = null;
         if (in_array('relationship', $selected, true)) {
-            $generator->generate($definition, app_path('Models'));
+            $generatedRelations = $generator->generateFromSchema(
+                $definition,
+                $schema,
+                app_path('Models')
+            );
             $this->info('Relationship generated successfully.');
         }
 
         if (in_array('fillable', $selected, true)) {
-            $migrationReader = new MigrationReader();
             $fillableGenerator = new FillableGenerator();
 
-            $fillableGenerator->generate(
-                app_path("Models/{$modelA}.php"),
-                $migrationReader->getColumns($migrationPathA)
+            $fillableGenerator->generateFromTable(
+                $this->modelPath($modelA),
+                $schema->table($definition->modelATable),
+                $this->modelBasename($modelA)
             );
 
-            $fillableGenerator->generate(
-                app_path("Models/{$modelB}.php"),
-                $migrationReader->getColumns($migrationPathB)
+            $fillableGenerator->generateFromTable(
+                $this->modelPath($modelB),
+                $schema->table($definition->modelBTable),
+                $this->modelBasename($modelB)
             );
 
             $this->info('$fillable generated');
         }
 
-        $relations = $generator->relationNames($definition);
+        $relations = $generatedRelations ?? $generator->relationNames($definition);
         if (in_array('queries', $selected, true)) {
             $queryGenerator = new QueryGenerator();
             $queryGenerator->generate(
@@ -215,30 +183,46 @@ class RelationMakeCommand extends Command
         return array_values(array_unique($selected));
     }
 
-    private function findMigration(string $model): ?string
+    private function modelTable(string $model): string
     {
-        $table = str($model)->snake()->plural();
+        $modelBasename = $this->modelBasename($model);
+        $class = str_contains($model, '\\') ? ltrim($model, '\\') : 'App\\Models\\' . $modelBasename;
+        if (
+            class_exists($class)
+            && class_exists(\Illuminate\Database\Eloquent\Model::class)
+            && is_subclass_of($class, \Illuminate\Database\Eloquent\Model::class)
+        ) {
+            $instance = new $class();
+            return $instance->getTable();
+        }
 
-        $migrationDirectory = database_path('migrations');
+        return Str::plural(Str::snake($modelBasename));
+    }
 
-        $files = glob(
-            $migrationDirectory . '/*.php'
-        );
-
-        foreach ($files as $file) {
-
-            $content = file_get_contents($file);
-
-            if (
-                str_contains(
-                    $content,
-                    "Schema::create('{$table}'"
-                )
-            ) {
-                return $file;
+    private function modelBasename(string $model): string
+    {
+        $parts = explode('\\', ltrim($model, '\\'));
+        foreach ($parts as $part) {
+            if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $part) !== 1) {
+                throw new \InvalidArgumentException("Invalid model class name: {$model}");
             }
         }
 
-        return null;
+        return end($parts);
     }
+
+    private function modelPath(string $model): string
+    {
+        return app_path('Models' . DIRECTORY_SEPARATOR . $this->modelBasename($model) . '.php');
+    }
+
+    private function assertSchemaTable($schema, ?string $table, string $model): void
+    {
+        if ($table === null || $schema->table($table) === null) {
+            throw new \RuntimeException(
+                "Could not find a migration table for model {$model}."
+            );
+        }
+    }
+
 }
