@@ -20,6 +20,8 @@ usuario, puede:
 2. Crear o actualizar las propiedades `$fillable` leyendo las migraciones.
 3. Añadir métodos de consulta a `ConsultasController`.
 4. Añadir rutas GET a `routes/web.php`.
+5. Registrar controladores CRUD existentes en rutas API usando un generador
+   independiente.
 
 No crea modelos ni migraciones, no ejecuta migraciones y no configura
 controladores o rutas que no estén dentro de estas operaciones. Modifica los
@@ -33,6 +35,7 @@ src/
 ├── Console/Commands/RelationMakeCommand.php
 ├── Generators/
 │   ├── FillableGenerator.php
+│   ├── ApiRouteGenerator.php
 │   ├── MigrationReader.php
 │   ├── QueryGenerator.php
 │   ├── RelationshipGenerator.php
@@ -58,6 +61,7 @@ src/
 | `Generators/FillableGenerator.php` | Construye y escribe `$fillable` en un modelo. |
 | `Generators/QueryGenerator.php` | Crea o actualiza `ConsultasController` con métodos que cargan relaciones. |
 | `Generators/RouteGenerator.php` | Añade rutas GET que apuntan a los métodos del controlador. |
+| `Generators/ApiRouteGenerator.php` | Mantiene los recursos CRUD en `routes/lrg_api.php` y registra una inclusión en `routes/api.php`, separado por ahora de `relation:make`. |
 
 El autoload PSR-4 del paquete usa el prefijo
 `Franciscovillaquiran\LaravelRelationGenerator\` para el directorio `src/`.
@@ -157,8 +161,10 @@ pueden quedar aplicadas. No hay transacción ni reversión automática.
 - `modelA`: nombre de clase del primer modelo.
 - `modelB`: nombre de clase del segundo modelo.
 - `cardinality`: cardinalidad validada por el comando.
-- `foreignTable`: tabla indicada para `1:1` o `1:N`; opcional.
-- `pivotTable`: tabla indicada para `N:M`; opcional.
+- `foreignTable`: tabla opcional para el generador legado `generate()`.
+- `pivotTable`: tabla opcional para el generador legado `generate()`.
+- `modelATable` / `modelBTable`: nombres físicos de tabla para la generación
+  estructural; el comando los toma del modelo Eloquent o de la convención Laravel.
 
 El comando crea esta definición incluso si no se seleccionó `relacion`.
 `RelationshipGenerator::relationNames()` usa los nombres y la cardinalidad para
@@ -166,70 +172,56 @@ proporcionar los nombres que consume `QueryGenerator`, sin escribir archivos.
 
 ## 6. Cómo se generan las relaciones Eloquent
 
-`RelationshipGenerator::generate()` comprueba la cardinalidad y delega a la
-implementación correspondiente. Primero requiere que ambos archivos existan
-bajo `app_path('Models')`, con el nombre literal `<Modelo>.php`.
+`RelationshipGenerator::generateFromSchema()` usa un `DatabaseSchema` ya
+obtenido por `MigrationReader`, resuelve la FK o tabla pivote y valida la
+cardinalidad antes de modificar los modelos. El comando usa esta ruta para
+`relacion`. El método legado `generate()` se conserva para consumidores previos.
+Ambos exigen que los archivos de modelo existan en `app/Models`.
 
-### Nombres calculados
+### Nombres, orientación y claves
 
-Las relaciones se nombran de forma simétrica:
+Los nombres de métodos se calculan con `Illuminate\Support\Str`. En la ruta
+estructural, la dirección de la FK decide qué modelo declara `hasOne()` o
+`hasMany()` y cuál declara `belongsTo()`:
 
-| Cardinalidad | En el modelo A | En el modelo B |
-|---|---|---|
-| `1:1` | nombre de B en camel case con la primera letra en minúscula | nombre de A con la primera letra en minúscula |
-| `1:N` | nombre de B en minúscula inicial y pluralizado | nombre de A en minúscula inicial |
-| `N:M` | nombre de B en minúscula inicial y pluralizado | nombre de A en minúscula inicial y pluralizado |
+- `1:1`: requiere una FK cuya columna local sea única; el lado que contiene la
+  FK recibe `belongsTo()` y el otro `hasOne()`.
+- `1:N`: el lado que contiene la FK recibe `belongsTo()` y el otro `hasMany()`.
+- `N:M`: requiere una tabla pivote reconocida por el lector y declara
+  `belongsToMany()` en ambos lados.
 
-La pluralización es una regla local sencilla: una palabra terminada en `y`
-cambia a `ies`; una terminada en `s` queda igual; en los demás casos se añade
-`s`. No usa el pluralizador de Laravel y no cubre plurales irregulares ni todos
-los casos del idioma inglés.
+La salida estructural incluye las claves foráneas/locales/referidas explícitas.
+Para `belongsToMany()` se especifican además la tabla pivote, ambas claves
+pivote y ambas claves relacionadas; así no se depende del orden convencional
+de nombres de tablas.
 
-### Tipo de método y tabla de clave foránea
+El comando resuelve los nombres de tabla del modelo Eloquent cuando la clase
+está disponible; de otro modo usa `Str::snake()` y `Str::plural()`. Un modelo
+con tabla configurada manualmente debe poder cargarse en Laravel para respetar
+ese nombre.
 
-Para `1:1` y `1:N`, el comando pide la tabla que contiene la clave foránea. El
-generador compara el texto recibido (después de quitar espacios en los
-extremos) con el nombre del modelo B o con una forma pluralizada en snake case
-derivada de ese modelo. Si coincide, coloca `hasOne`/`hasMany` en A y
-`belongsTo` en B; si no coincide, invierte esa orientación.
-
-Para `N:M`, se requiere el nombre de la tabla pivote y se generan métodos
-`belongsToMany` en ambos modelos usando esa tabla.
-
-Los métodos generados llaman a Eloquent sin especificar explícitamente nombres
-de claves foráneas, claves locales o claves relacionadas. Los modelos y
-relaciones generados presuponen el namespace fijo `App\Models`.
+No se generan relaciones Eloquent basadas en claves compuestas porque el ORM
+no ofrece soporte nativo para ellas. Si más de una FK o pivote puede conectar
+los modelos solicitados, se informa la ambigüedad y no se escribe el código.
+Una cardinalidad diferente a la declarada en la migración también se rechaza.
 
 ### Escritura en los modelos
 
-Cada método se inserta justo antes de la última llave `}` del archivo del
-modelo. El generador comprueba si el texto exacto del método ya está presente
-para evitar insertarlo de nuevo. Esta comprobación es textual: no interpreta
-PHP ni detecta métodos equivalentes con formato distinto.
+Los modelos se tokenizan con `token_get_all()` y `TOKEN_PARSE`; no se ejecuta
+su código. Los métodos se agregan dentro de la clase detectada. Si el mismo
+nombre ya existe con el cuerpo generado, la ejecución es idempotente; un
+método con ese nombre y una definición diferente provoca un conflicto. Se
+preservan los miembros no relacionados.
 
 ## 7. Cómo se localizan las migraciones y se genera `$fillable`
-
-### Localización de la migración
-
-Cuando se elige `fillable`, el comando:
-
-1. Convierte el nombre del modelo a snake case y lo pluraliza mediante el
-   helper `str()` de Laravel.
-2. Recorre los archivos `*.php` de `database/migrations`.
-3. Devuelve el primer archivo cuyo contenido contiene exactamente el patrón
-   `Schema::create('<tabla>'`.
-
-Esto asume el nombre convencional pluralizado de la tabla y esa forma literal
-de declaración. No consulta la base de datos ni evalúa la migración. Si varias
-migraciones coinciden, usa la primera según el orden devuelto por `glob()`.
 
 ### Lector anterior y análisis estructural
 
 El método público `getColumns($migrationPath)` conserva el comportamiento
 histórico: busca nombres de columnas con una expresión regular y reconoce
 textualmente `id()`, `timestamps()` y `softDeletes()`. El comando existente
-`relation:make` sigue usando este método para `$fillable`; este incremento no
-lo reemplaza ni modifica la firma del comando.
+`relation:make` conserva esta API disponible, pero ahora usa el análisis
+estructural para generar `$fillable`; la firma del comando no cambia.
 
 El nuevo método `analyze($migrationPaths)` construye el esquema estructural
 descrito en la sección 14. Usa `token_get_all()` y un intérprete acotado de
@@ -244,23 +236,29 @@ El método histórico también agrega estos casos reconocidos por texto:
 Al final elimina duplicados. `getColumns()` no analiza el AST, las variables,
 condiciones o helpers de la migración. Las llamadas sin un nombre explícito de
 columna y variantes de formato que no coincidan con los textos buscados pueden
-no detectarse.
+no detectarse. El comando nuevo ya no usa `getColumns()` para generar `$fillable`.
 
 ### Escritura de `$fillable`
 
-`FillableGenerator` requiere que el archivo del modelo exista. Filtra `id`,
-`created_at`, `updated_at` y `deleted_at`; las columnas restantes se escriben
-en `protected $fillable = [...]`.
+`FillableGenerator::generateFromTable()` requiere un modelo existente y usa
+`SchemaTable`. Excluye todas las columnas de PK, las autoincrementales,
+`created_at`, `updated_at`, `deleted_at` y `remember_token`. Las demás columnas
+incluidas por el lector, también las FK, son candidatos estructurales.
 
-Busca una propiedad `protected $fillable = [...]` mediante una expresión
-regular y la reemplaza si la encuentra. Si no la encuentra, inserta una nueva
-propiedad antes de la última llave del archivo. La lista se reconstruye desde
-la migración: no se fusiona con el contenido anterior ni se conserva una
-configuración manual de columnas.
+Si no existe `$fillable`, crea una lista literal. Si existe una lista literal
+estática, solo acepta que ya incluya todos los candidatos y la conserva sin
+cambios; si faltan columnas, hay `$guarded`, o la configuración es dinámica o
+ambigua, informa el conflicto en vez de ampliar o reemplazar una allowlist
+manual. Se eliminan duplicados al generar una lista nueva.
+
+La admisibilidad estructural no es una política de autorización: una migración
+no indica qué campos puede asignar cada usuario. Revise manualmente campos
+sensibles (por ejemplo credenciales, roles o permisos) antes de aceptar una
+allowlist generada.
 
 ## 8. Cómo se genera `ConsultasController`
 
-La ruta de destino es fija:
+La ruta web heredada de destino es fija:
 
 ```text
 app/Http/Controllers/ConsultasController.php
@@ -304,14 +302,15 @@ por lo que depende de que esté disponible como alias en la aplicación Laravel.
 
 La detección de duplicados de rutas es textual. Las rutas se agregan al final
 del contenido existente; no se inspeccionan grupos, middleware, nombres de
-ruta, controladores invocables ni configuración de API.
+ruta, controladores invocables ni configuración de API. Esta funcionalidad
+heredada permanece independiente de las rutas CRUD API.
 
 ## 10. Archivos de la aplicación que puede modificar
 
 | Selección | Archivos objetivo |
 |---|---|
 | `relacion` | `app/Models/ModelA.php`, `app/Models/ModelB.php` |
-| `fillable` | Los mismos modelos; la información se busca en `database/migrations/*.php`. |
+| `fillable` | Los mismos modelos; la información se obtiene de `MigrationReader::analyze()`. |
 | `consultas` | `app/Http/Controllers/ConsultasController.php` |
 | `rutas` | `routes/web.php` |
 
@@ -327,8 +326,8 @@ Generar todo (aceptando la selección predeterminada `todo`):
 php artisan relation:make User Post 1:N
 ```
 
-Cuando se solicite la selección, introducir `todo`. Para `1:N`, la generación
-de la relación también preguntará qué tabla contiene la clave foránea.
+Cuando se solicite la selección, introducir `todo`. La dirección de la clave
+foránea se determina desde las migraciones, sin pedir el nombre de la tabla.
 
 Generar únicamente relaciones y `$fillable`:
 
@@ -351,37 +350,34 @@ previamente en `ConsultasController`.
 Estos puntos describen el comportamiento del código actual, no capacidades
 implícitas de Laravel:
 
-1. **Edición textual de PHP.** Los generadores insertan o reemplazan texto con
-   expresiones regulares y búsqueda de la última llave; no usan un parser de
-   PHP.
+1. **Edición acotada de modelos.** Las relaciones y `$fillable` usan el
+   tokenizer de PHP y rechazan estructuras que no pueden editar con seguridad.
+   Los generadores heredados de consultas y rutas conservan sus ediciones
+   textuales.
 2. **Convenciones rígidas de proyecto.** Se esperan modelos en
    `app/Models`, clases bajo `App\Models`, un controlador específico y
    `routes/web.php`.
-3. **El flujo heredado sigue siendo limitado.** La localización de migraciones
-   para `$fillable` se infiere por convención y una cadena concreta;
-   `getColumns()` extrae nombres mediante texto. El nuevo `analyze()` cubre un
-   subconjunto estructural explícito, no toda la sintaxis de migraciones PHP.
-4. **Relaciones sin claves personalizadas.** No se configuran claves foráneas,
-   claves locales, claves relacionadas, columnas pivote ni columnas extra de
-   pivote.
+3. **Análisis estructural acotado.** `getColumns()` sigue disponible como API
+   legado textual; `analyze()` cubre solo el subconjunto estático descrito en
+   la sección 14.
+4. **Límites de Eloquent.** No se generan relaciones con claves compuestas.
+   La configuración de fillable es estructural, no una política de acceso ni
+   de autorización.
 5. **Consultas y rutas fijas.** Se generan consultas `get()` sin filtros,
    paginación o autorización, y rutas GET sin middleware ni nombres.
-6. **Generación parcialmente idempotente.** Hay comprobaciones de duplicados
-   textuales, pero diferencias de formato pueden producir duplicados.
-7. **Escrituras no transaccionales.** Una excepción después de una escritura no
-   restaura automáticamente los archivos anteriores. Los resultados de
-   operaciones de lectura/escritura (`file_get_contents`,
-   `file_put_contents`, `glob`) no se validan en todos los puntos.
+6. **Generadores heredados.** Consultas y rutas conservan sus comprobaciones
+   textuales e idempotencia limitada.
+7. **Escrituras por archivo.** Las ediciones individuales usan archivo
+   temporal y reemplazo; un fallo del segundo modelo no revierte un primer
+   archivo ya actualizado.
 8. **Selección interactiva solamente.** Los elementos no son opciones CLI
    independientes; una automatización debe responder al prompt.
-9. **Lector estructural limitado.** `analyze()` solo interpreta el subconjunto
-   estático de migraciones que se documenta en la sección 14; el lector
-   histórico `getColumns()` sigue siendo textual y el comando `$fillable` aún
-   depende de él.
-10. **Pruebas acotadas al lector.** `php tests/run.php` cubre el análisis
-    estructural y el comportamiento legado del lector y del cálculo de nombres.
-    No es una suite de integración completa de Laravel ni cubre todos los
-    generadores de archivos.
+9. **Modelo cargable para tablas personalizadas.** Si un modelo configura una
+   tabla no convencional, debe poder cargarse para que el comando use su
+   `getTable()`; de lo contrario se usa la convención Laravel.
+10. **Pruebas.** `php tests/run.php` cubre parser, índice y generadores; la
+    prueba de consultas Eloquent/SQLite se ejecuta con el autoloader de
+    `illuminate/database`.
 
 ## 13. Estado de referencia
 
@@ -389,8 +385,8 @@ implícitas de Laravel:
   es el primer incremento funcional de LRG 2.0.
 - El comando conserva los tres argumentos posicionales y agrega una selección
   interactiva.
-- No se cambia la firma del comando ni se conectan todavía metadatos
-  estructurales a los generadores existentes.
+- No se cambia la firma del comando ni la selección interactiva. Las
+  relaciones y `$fillable` ya consumen metadatos estructurales.
 
 ## 14. Análisis estructural de migraciones (primer incremento LRG 2.0)
 
@@ -554,8 +550,8 @@ Un índice ausente, dañado o de otra versión se descarta y se reconstruye desd
 las migraciones. El nuevo JSON se escribe en un archivo temporal en el mismo
 directorio y se instala mediante reemplazo; un error al interpretar o construir
 el esquema no reemplaza el índice anterior. El índice solo se actualiza al
-invocar `MigrationReader::analyze()`; el comando `relation:make` y sus
-generadores conservan su flujo existente.
+invocar `MigrationReader::analyze()`; el comando `relation:make` lo actualiza
+cuando genera relaciones o `$fillable`.
 
 ### Contrato recomendado para consumidores posteriores
 
@@ -568,6 +564,115 @@ DatabaseSchema::toArray(): array{tables: array, relations: list<array>, migratio
 ```
 
 Los consumidores posteriores pueden llamar a `analyze()` y usar directamente
-`DatabaseSchema` o su serialización normalizada. El índice persistente no está
-conectado todavía a los generadores Eloquent actuales. No se implementan CRUD,
-rutas API ni cambios funcionales en dichos generadores.
+`DatabaseSchema` o su serialización normalizada. El análisis no ejecuta CRUD
+ni operaciones sobre tablas pivote; el generador de rutas API documentado en
+la sección 17 registra únicamente controladores CRUD preexistentes.
+
+## 15. Generación estructural de relaciones y `$fillable` (tercer incremento LRG 2.0)
+
+Cuando se elige `relacion` o `fillable`, `relation:make` analiza el directorio
+completo de migraciones con `MigrationReader::analyze()` y utiliza el índice
+persistente de la sección anterior. Los argumentos posicionales del comando y
+la selección interactiva no cambian.
+
+`RelationshipGenerator::generateFromSchema()` identifica las tablas de ambos
+modelos, selecciona una relación de la cardinalidad solicitada y utiliza sus
+claves reales. Una FK local única produce `hasOne()`/`belongsTo()`; una FK no
+única produce `hasMany()`/`belongsTo()`; una pivote reconocida produce
+`belongsToMany()` con tabla, claves pivote, clave local y clave referida
+explícitas. Los nombres se calculan con `Illuminate\Support\Str`.
+
+No se adivina una cardinalidad desde los nombres de clase. Una cardinalidad que
+no concuerde con el esquema, varias FKs candidatas, una pivote no inequívoca o
+claves compuestas incompatibles con Eloquent producen error antes de escribir.
+La edición de clases es sintáctica y acotada: preserva métodos no relacionados,
+omite una relación ya generada de forma equivalente y reporta conflicto si el
+método solicitado ya existe con otro cuerpo.
+
+`FillableGenerator::generateFromTable()` excluye claves primarias,
+autoincrementos, timestamps convencionales, `deleted_at` y
+`remember_token`. Las FK permanecen entre los candidatos para permitir
+asignaciones CRUD cuando la aplicación las autorice. Si no hay `$fillable`, se
+genera la lista. Una lista manual estática se conserva únicamente si ya
+contiene todos los candidatos; de lo contrario se informa conflicto y no se
+amplía la allowlist. Configuración `$guarded` o dinámica tampoco se modifica.
+
+Este filtrado es estructural, no seguridad de autorización: no infiere
+permisos ni identifica por sí mismo todos los campos sensibles. Revise las
+allowlists generadas en busca de credenciales, roles y otros campos cuyo
+control depende de la aplicación.
+
+Las relaciones y fillables se insertan usando el tokenizer de PHP, validando
+la clase y su sintaxis. Los modelos deben existir en `app/Models`. Los cambios
+son atómicos por archivo, pero no hay transacción conjunta entre ambos modelos.
+Los generadores heredados de consultas y rutas, su selección y su flujo se
+mantienen; cuando la relación se genera, el comando comparte sus nombres con
+el generador de consultas.
+
+La suite estructural se ejecuta con `php tests/run.php`. Las consultas reales
+de Eloquent sobre SQLite se verifican por separado:
+
+```bash
+php tests/eloquent_integration.php <ruta-a-vendor/autoload.php>
+```
+
+La prueba requiere `illuminate/database` y una extensión PDO SQLite disponibles
+en el entorno.
+
+## 17. Generación de rutas CRUD API (quinto incremento LRG 2.0)
+
+`ApiRouteGenerator` es intencionalmente independiente del comando
+`relation:make` en este incremento. Se usa después de generar los controladores
+CRUD:
+
+```php
+(new ApiRouteGenerator())->generate(base_path(), [
+    App\Models\User::class,
+    App\Models\BlogPost::class,
+]);
+```
+
+Para cada modelo calcula un recurso Laravel en snake_case plural (`users`,
+`blog_posts`) y registra `Route::apiResource()` hacia
+`App\Http\Controllers\Api\{Model}Controller`. Esto expone GET colección,
+POST colección, GET recurso, PUT/PATCH recurso y DELETE recurso; Laravel
+resuelve los métodos `index`, `store`, `show`, `update` y `destroy` y no crea
+las acciones web `create`/`edit`.
+
+El generador administra solo el bloque delimitado por marcadores en
+`routes/lrg_api.php`; el contenido manual fuera de ese bloque se conserva.
+Añade una sola inclusión marcada `require_once` al final de `routes/api.php`,
+sin tocar `routes/web.php`. Las escrituras son atómicas individualmente.
+Repetir la misma generación conserva el archivo sin añadir declaraciones.
+
+Antes de escribir comprueba la existencia de cada controlador en
+`app/Http/Controllers/Api`, su namespace/clase y que las cinco acciones
+necesarias sean métodos públicos con PHP válido. Confirma la carga de
+`routes/api.php` mediante la configuración estática `withRouting(api: ...)`
+de Laravel 11+ o el grupo API convencional (`middleware('api')`,
+`prefix('api')`) del `RouteServiceProvider` de Laravel 10. Si el archivo API
+no existe o no puede verificarse su registro, falla con el requisito pendiente
+y no informa éxito.
+
+Detecta llamadas estáticas de rutas manuales con URI solapada, nombres
+convencionales en uso, importaciones `Route` incompatibles y bloques
+administrados ambiguos. Ante una posible colisión o argumentos dinámicos de
+ruta cuya URI no se pueda determinar, rechaza la generación. No puede resolver
+prefijos de grupos dinámicos, aliases de rutas definidos mediante código
+arbitrario ni colisiones de rutas cargadas desde archivos externos; esos
+patrones requieren revisión manual. Tampoco crea controladores ni rutas
+anidadas/pivote.
+
+En este incremento no se modifica `RelationMakeCommand`: el comando principal
+continúa generando únicamente las operaciones anteriores. La integración
+automática de controlador y rutas se deja para el incremento siguiente. El
+generador puede probarse desde una aplicación que ya tenga los controladores:
+
+```bash
+php tests/api_routes_integration.php <ruta-a-vendor/autoload.php>
+```
+
+La integración comprueba `route:list` y despacha solicitudes HTTP sobre una
+aplicación Laravel temporal. También se ejecutan pruebas autocontenidas de
+preservación de `routes/web.php`, rutas manuales, idempotencia, configuración
+Laravel 10/11, controladores incompletos y conflictos detectables.

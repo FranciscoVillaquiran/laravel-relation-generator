@@ -2,83 +2,98 @@
 
 namespace Franciscovillaquiran\LaravelRelationGenerator\Generators;
 
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\SchemaTable;
+use RuntimeException;
+
 class FillableGenerator
 {
     /**
-     * Genera el contenido de $fillable a partir de una lista de columnas.
+     * Preserve the legacy list-based API while safely merging static manual fillable entries.
+     *
+     * @param list<string> $columns
      */
     public function generate(string $modelPath, array $columns): void
     {
-        if (!file_exists($modelPath)) {
-            throw new \RuntimeException(
-                "Model not found: {$modelPath}"
-            );
+        $this->assertModelExists($modelPath);
+        $this->assertColumnNames($columns);
+
+        (new ModelSourceEditor())->updateFillable(
+            $modelPath,
+            $this->filterColumns($columns),
+            pathinfo($modelPath, PATHINFO_FILENAME)
+        );
+    }
+
+    public function generateFromTable(string $modelPath, SchemaTable $table, ?string $modelClass = null): void
+    {
+        $this->assertModelExists($modelPath);
+
+        $primaryColumns = [];
+        foreach ($table->indexes as $index) {
+            if ($index->type === 'primary') {
+                array_push($primaryColumns, ...$index->columns);
+            }
         }
 
-        $fillableColumns = array_values(
-            array_filter(
-                $columns,
-                fn ($column) => !in_array($column, [
-                    'id',
+        $columns = [];
+        foreach ($table->columns as $column) {
+            if (
+                $column->autoIncrement
+                || in_array($column->name, $primaryColumns, true)
+                || in_array($column->name, [
                     'created_at',
                     'updated_at',
                     'deleted_at',
-                ])
-            )
-        );
-
-        $fillable = $this->buildFillable($fillableColumns);
-
-        $content = file_get_contents($modelPath);
-
-        $pattern = '/protected\s+\$fillable\s*=\s*\[.*?\];/s';
-
-        if (preg_match($pattern, $content)) {
-            $content = preg_replace(
-                $pattern,
-                $fillable,
-                $content,
-                1
-            );
-        } else {
-            $position = strrpos($content, '}');
-
-            if ($position === false) {
-                throw new \RuntimeException(
-                    "Could not find the end of model: {$modelPath}"
-                );
+                    'remember_token',
+                ], true)
+            ) {
+                continue;
             }
 
-            $content = substr_replace(
-                $content,
-                "\n    {$fillable}\n",
-                $position,
-                0
-            );
+            $columns[] = $column->name;
         }
 
-        file_put_contents($modelPath, $content);
+        (new ModelSourceEditor())->updateFillable(
+            $modelPath,
+            $this->filterColumns($columns),
+            $modelClass ?? pathinfo($modelPath, PATHINFO_FILENAME)
+        );
+    }
+
+    private function assertModelExists(string $modelPath): void
+    {
+        if (!is_file($modelPath)) {
+            throw new RuntimeException("Model not found: {$modelPath}");
+        }
     }
 
     /**
-     * Construye el código PHP de protected $fillable.
+     * @param list<mixed> $columns
      */
-    private function buildFillable(array $columns): string
+    private function assertColumnNames(array $columns): void
     {
-        if (empty($columns)) {
-            return 'protected $fillable = [];';
-        }
-
-        $lines = [
-            'protected $fillable = [',
-        ];
-
         foreach ($columns as $column) {
-            $lines[] = "        '{$column}',";
+            if (!is_string($column) || $column === '') {
+                throw new RuntimeException('Fillable column names must be non-empty strings.');
+            }
         }
+    }
 
-        $lines[] = '    ];';
-
-        return implode("\n", $lines);
+    /**
+     * @param list<string> $columns
+     * @return list<string>
+     */
+    private function filterColumns(array $columns): array
+    {
+        return array_values(array_unique(array_filter(
+            $columns,
+            static fn (string $column): bool => !in_array($column, [
+                'id',
+                'created_at',
+                'updated_at',
+                'deleted_at',
+                'remember_token',
+            ], true)
+        )));
     }
 }
