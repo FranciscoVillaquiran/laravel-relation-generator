@@ -33,17 +33,19 @@ class ApiRouteGenerator
         }
 
         $this->assertApiRoutesRegistered($projectRoot, $apiRoutesPath);
-        $models = $this->normalizeModels($modelClasses);
+        $apiSource = $this->readPhpFile($apiRoutesPath);
+        $managedSource = is_file($managedRoutesPath)
+            ? $this->readPhpFile($managedRoutesPath)
+            : "<?php\n\n";
+        $models = $this->mergeManagedModels(
+            $this->managedModels($managedSource, $managedRoutesPath),
+            $this->normalizeModels($modelClasses)
+        );
 
         foreach ($models as $model) {
             $controllerPath = $controllersDirectory . DIRECTORY_SEPARATOR . $model['controller'] . '.php';
             $this->assertControllerActions($controllerPath, $model['controller']);
         }
-
-        $apiSource = $this->readPhpFile($apiRoutesPath);
-        $managedSource = is_file($managedRoutesPath)
-            ? $this->readPhpFile($managedRoutesPath)
-            : "<?php\n\n";
 
         $apiUpdated = $this->addManagedInclude($apiSource);
         $unmanagedRoutes = $this->withoutManagedBlock($managedSource, $managedRoutesPath);
@@ -110,6 +112,83 @@ class ApiRouteGenerator
         return $models;
     }
 
+    /**
+     * @return list<array{class: string, controller: string, resource: string}>
+     */
+    private function managedModels(string $source, string $path): array
+    {
+        $beginCount = substr_count($source, self::BEGIN_MARKER);
+        $endCount = substr_count($source, self::END_MARKER);
+        if ($beginCount !== $endCount || $beginCount > 1) {
+            throw new RuntimeException("Ambiguous LRG-managed route markers in {$path}.");
+        }
+        if ($beginCount === 0) {
+            return [];
+        }
+
+        $begin = strpos($source, self::BEGIN_MARKER);
+        $end = strpos($source, self::END_MARKER, $begin);
+        if ($end === false) {
+            throw new RuntimeException("Incomplete LRG-managed route block in {$path}.");
+        }
+        $body = trim(substr($source, $begin + strlen(self::BEGIN_MARKER), $end - $begin - strlen(self::BEGIN_MARKER)));
+        if ($body === '') {
+            return [];
+        }
+
+        $models = [];
+        $resources = [];
+        foreach (preg_split('/\R/', $body) as $line) {
+            if (!preg_match(
+                '/^\s*Route::apiResource\([\'"]([A-Za-z0-9_-]+)[\'"],\s*\\\\App\\\\Http\\\\Controllers\\\\Api\\\\([A-Za-z_][A-Za-z0-9_]*)::class\);\s*$/',
+                $line,
+                $matches
+            ) || !str_ends_with($matches[2], 'Controller')) {
+                throw new RuntimeException(
+                    "The LRG-managed route block in {$path} contains an unsupported manual edit."
+                );
+            }
+
+            $resource = $matches[1];
+            $controller = $matches[2];
+            if (isset($resources[$resource])) {
+                throw new RuntimeException("The LRG-managed route block duplicates API resource '{$resource}'.");
+            }
+            $resources[$resource] = $controller;
+            $models[] = [
+                'class' => 'App\\Models\\' . substr($controller, 0, -strlen('Controller')),
+                'controller' => $controller,
+                'resource' => $resource,
+            ];
+        }
+
+        return $models;
+    }
+
+    /**
+     * @param list<array{class: string, controller: string, resource: string}> $existing
+     * @param list<array{class: string, controller: string, resource: string}> $requested
+     * @return list<array{class: string, controller: string, resource: string}>
+     */
+    private function mergeManagedModels(array $existing, array $requested): array
+    {
+        $models = [];
+        foreach (array_merge($existing, $requested) as $model) {
+            $resource = $model['resource'];
+            if (isset($models[$resource])) {
+                if ($models[$resource]['controller'] !== $model['controller']) {
+                    throw new RuntimeException(
+                        "Multiple models resolve to the managed API resource '{$resource}'."
+                    );
+                }
+                continue;
+            }
+            $models[$resource] = $model;
+        }
+
+        return array_values($models);
+    }
+
     private function assertApiRoutesRegistered(string $projectRoot, string $apiRoutesPath): void
     {
         $bootstrapPath = $projectRoot . DIRECTORY_SEPARATOR . 'bootstrap'
@@ -143,16 +222,16 @@ class ApiRouteGenerator
 
     private function hasLaravel11ApiRouteRegistration(string $source): bool
     {
-        if (preg_match_all('/withRouting\s*\(/', $source) !== 1
-            || preg_match('/withRouting\s*\(\s*using\s*:/i', $source) === 1
-            || preg_match(
-                '/withRouting\s*\(\s*(?![A-Za-z_][A-Za-z0-9_]*\s*:)/',
-                $source
-            ) === 1
+        if (
+            preg_match_all('/withRouting\s*\(/', $source) !== 1
             || !preg_match(
                 '/withRouting\s*\(\s*(api|web|pages|commands|channels|health|apiPrefix|then)\s*:/i',
                 $source
-            )) {
+            )
+            || preg_match('/withRouting\s*\(\s*using\s*:/i', $source) === 1
+            || !preg_match('/withRouting\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/', $source, $firstArgument)
+            || strtolower($firstArgument[1]) === 'using'
+        ) {
             return false;
         }
 

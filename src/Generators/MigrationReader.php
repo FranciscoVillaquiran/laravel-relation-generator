@@ -20,7 +20,11 @@ class MigrationReader
      * @param string|list<string> $migrationPaths A migration file, directory, or list of either.
      * @param string|null $indexPath Override the Laravel application's default structural index path.
      */
-    public function analyze(string|array $migrationPaths, ?string $indexPath = null): DatabaseSchema
+    public function analyze(
+        string|array $migrationPaths,
+        ?string $indexPath = null,
+        bool $persistIndex = true
+    ): DatabaseSchema
     {
         $files = $this->migrationFiles($migrationPaths);
 
@@ -31,7 +35,11 @@ class MigrationReader
         if ($indexPath !== null) {
             $projectRoot = function_exists('base_path') ? base_path() : getcwd();
 
-            return (new StructuralSchemaIndex($indexPath, $projectRoot))->analyze($files, $this->parser);
+            return (new StructuralSchemaIndex($indexPath, $projectRoot))->analyze(
+                $files,
+                $this->parser,
+                $persistIndex
+            );
         }
 
         $operations = [];

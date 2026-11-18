@@ -1,8 +1,8 @@
 # Diseño y funcionamiento de Laravel Relation Generator
 
-Este documento parte del baseline `v1.1.0` y registra el primer incremento
-estructural de LRG 2.0. Describe el comportamiento actual del código y separa
-las funciones implementadas de los límites y propuestas de evolución.
+Este documento describe el estado implementado de LRG 2.0 y sus diferencias
+frente al baseline `v1.1.0`. Separa las capacidades disponibles de las
+limitaciones que requieren decisiones o configuración de la aplicación.
 
 ## 1. Qué es el proyecto
 
@@ -13,20 +13,19 @@ comando Artisan:
 relation:make
 ```
 
-El comando ayuda a conectar dos modelos Eloquent. Según la selección del
-usuario, puede:
+El comando conecta dos modelos Eloquent según las migraciones existentes.
+Puede:
 
 1. Añadir métodos de relación a los modelos.
 2. Crear o actualizar las propiedades `$fillable` leyendo las migraciones.
 3. Añadir métodos de consulta a `ConsultasController`.
 4. Añadir rutas GET a `routes/web.php`.
-5. Registrar controladores CRUD existentes en rutas API usando un generador
-   independiente.
+5. Generar controladores CRUD estructurales para ambos modelos.
+6. Registrar los controladores en rutas REST API.
 
-No crea modelos ni migraciones, no ejecuta migraciones y no configura
-controladores o rutas que no estén dentro de estas operaciones. Modifica los
-archivos existentes directamente en la aplicación Laravel que ejecuta el
-comando.
+No crea modelos ni migraciones, no ejecuta migraciones y no genera autenticación
+ni reglas de negocio. La modalidad CRUD requiere modelos Eloquent y migraciones
+existentes en la aplicación Laravel.
 
 ## 2. Estructura del paquete
 
@@ -34,6 +33,8 @@ comando.
 src/
 ├── Console/Commands/RelationMakeCommand.php
 ├── Generators/
+│   ├── CrudGenerator.php
+│   ├── FileChangeTransaction.php
 │   ├── FillableGenerator.php
 │   ├── ApiRouteGenerator.php
 │   ├── MigrationReader.php
@@ -52,7 +53,7 @@ src/
 | Archivo | Responsabilidad |
 |---|---|
 | `RelationGeneratorServiceProvider.php` | Registra el comando cuando Laravel se ejecuta en consola. |
-| `Console/Commands/RelationMakeCommand.php` | Lee argumentos y selección, pide los datos que necesita y coordina las operaciones. |
+| `Console/Commands/RelationMakeCommand.php` | Valida argumentos/opciones, prepara los cambios, coordina los generadores y confirma el índice. |
 | `Relations/RelationDefinition.php` | Transporta los modelos, la cardinalidad y los nombres opcionales de tabla. |
 | `Generators/RelationshipGenerator.php` | Calcula los nombres de las relaciones y añade sus métodos a los modelos. |
 | `Generators/MigrationReader.php` | Conserva `getColumns()` para el flujo previo y ofrece `analyze()` para obtener el esquema normalizado. |
@@ -61,7 +62,9 @@ src/
 | `Generators/FillableGenerator.php` | Construye y escribe `$fillable` en un modelo. |
 | `Generators/QueryGenerator.php` | Crea o actualiza `ConsultasController` con métodos que cargan relaciones. |
 | `Generators/RouteGenerator.php` | Añade rutas GET que apuntan a los métodos del controlador. |
-| `Generators/ApiRouteGenerator.php` | Mantiene los recursos CRUD en `routes/lrg_api.php` y registra una inclusión en `routes/api.php`, separado por ahora de `relation:make`. |
+| `Generators/CrudGenerator.php` | Genera controladores CRUD y reglas de validación a partir de `SchemaTable`. |
+| `Generators/ApiRouteGenerator.php` | Acumula recursos en `routes/lrg_api.php` y mantiene una inclusión en `routes/api.php`. |
+| `Generators/FileChangeTransaction.php` | Conserva backups, aplica escrituras preparadas y recupera archivos si la operación falla. |
 
 El autoload PSR-4 del paquete usa el prefijo
 `Franciscovillaquiran\LaravelRelationGenerator\` para el directorio `src/`.
@@ -89,19 +92,21 @@ Laravel soportadas por la restricción.
 
 ## 4. Interfaz y flujo del comando
 
-La firma actual conserva tres argumentos posicionales obligatorios:
+La firma conserva los tres argumentos posicionales y agrega dos opciones
+booleanas:
 
 ```bash
 php artisan relation:make ModelA ModelB 1:N
+php artisan relation:make Category Product 1:N --crud --api
 ```
 
 Los valores admitidos para `cardinality` son exactamente `1:1`, `1:N` y `N:M`.
 La validación de cardinalidad ocurre antes de preguntar qué generar. Si no es
 válida, el comando muestra un error y devuelve `Command::FAILURE`.
 
-Después solicita una selección interactiva. La selección predeterminada es
-`todo`, así que aceptar la respuesta predeterminada mantiene la generación de
-los cuatro elementos. Los nombres reconocidos, en minúsculas, son:
+Sin `--crud` ni `--api`, el comando conserva la selección interactiva. La
+selección predeterminada es `todo`, que mantiene la generación de los cuatro
+elementos heredados:
 
 | Selección | Operación |
 |---|---|
@@ -118,41 +123,39 @@ insensible a mayúsculas porque cada segmento se convierte a minúsculas. `todo`
 no se puede combinar con otras opciones. Un valor desconocido o una selección
 vacía se rechaza.
 
-Los nombres aceptados son los literales del cuadro: por ejemplo, el parser
-acepta `relacion`, no una versión acentuada como `relación`. La selección se
-obtiene mediante `ask()`, no mediante una opción o argumento de consola; por
-tanto, la interfaz actual es interactiva.
+Los nombres aceptados son los literales del cuadro: por ejemplo, `relacion`,
+no `relación`. La modalidad `--crud` omite el prompt y selecciona relaciones,
+fillable y CRUD para ambos modelos. `--api` debe combinarse con `--crud`;
+genera además las rutas API. La modalidad CRUD no genera
+`ConsultasController` ni rutas web.
 
-### Orden de ejecución
+### Flujo y preparación
 
-Con una selección válida, el comando opera en este orden:
+Antes de escribir en la aplicación, el comando:
 
-1. Si se seleccionó `relacion`, solicita la tabla que contiene la clave
-   foránea para `1:1` o `1:N`, o la tabla pivote para `N:M`.
-2. Si se seleccionó `fillable`, localiza las migraciones de ambos modelos.
-   Si no encuentra alguna, termina con error antes de comenzar a generar.
-3. Si se seleccionó `relacion`, modifica los dos modelos.
-4. Si se seleccionó `fillable`, lee las migraciones y modifica los dos modelos.
-5. Calcula los nombres de relación.
-6. Si se seleccionó `consultas`, modifica o crea el controlador.
-7. Si se seleccionó `rutas`, modifica el archivo de rutas.
-8. Muestra mensajes de éxito y devuelve `Command::SUCCESS`.
+1. Valida cardinalidad, modelos, tablas y metadatos estructurales.
+2. Lee el índice o interpreta migraciones, sin escribir todavía el índice.
+3. Ejecuta los generadores sobre copias temporales de todos los archivos
+   objetivo. Allí detecta ambigüedades, configuraciones manuales incompatibles,
+   controladores existentes y colisiones de rutas.
+4. Comprueba la sintaxis PHP de los resultados preparados.
+5. Conserva copias recuperables, aplica el conjunto de cambios y verifica los
+   resultados de escritura.
+6. Comprueba que las migraciones no cambiaron durante la generación y actualiza
+   `.lrg/lrg-index.json` al final.
+7. Si una fase falla, recupera los archivos e índice anteriores y devuelve
+   `Command::FAILURE`.
 
-Solo se solicita información de tablas cuando se genera la relación. Del mismo
-modo, localizar migraciones solo es necesario para `fillable`; elegir solo
-`relacion`, `consultas` o `rutas` no inicia esa búsqueda.
+La modalidad interactiva ejecuta únicamente los elementos elegidos. Las
+selecciones `consultas` y `rutas` siguen dependiendo de los métodos y
+controladores heredados; `todo` conserva su significado anterior y no activa
+CRUD.
 
-Hay dos avisos de dependencia, no bloqueantes:
-
-- `consultas` sin `relacion` avisa que las relaciones deben existir ya en los
-  modelos.
-- `rutas` sin `consultas` avisa que los métodos del controlador deben existir
-  ya.
-
-El comando no valida que esos métodos o relaciones realmente existan. Tampoco
-ejecuta todas las validaciones sobre todos los archivos antes de la primera
-escritura: si una operación posterior falla, las modificaciones anteriores
-pueden quedar aplicadas. No hay transacción ni reversión automática.
+`--crud` necesita modelos en `app/Models` compatibles con Eloquent, tablas y
+claves primarias simples. `--api` requiere un archivo `routes/api.php`
+registrado en la configuración Laravel admitida y no ambigua. El comando no
+solicita tablas ni cardinalidades adicionales: obtiene esa información de las
+migraciones o falla si no puede resolverla.
 
 ## 5. Datos que se comparten entre componentes
 
@@ -307,16 +310,20 @@ heredada permanece independiente de las rutas CRUD API.
 
 ## 10. Archivos de la aplicación que puede modificar
 
-| Selección | Archivos objetivo |
+| Operación | Archivos objetivo |
 |---|---|
-| `relacion` | `app/Models/ModelA.php`, `app/Models/ModelB.php` |
-| `fillable` | Los mismos modelos; la información se obtiene de `MigrationReader::analyze()`. |
-| `consultas` | `app/Http/Controllers/ConsultasController.php` |
-| `rutas` | `routes/web.php` |
+| Relaciones / `$fillable` | `app/Models/ModelA.php`, `app/Models/ModelB.php` |
+| Consultas heredadas | `app/Http/Controllers/ConsultasController.php` |
+| Rutas web heredadas | `routes/web.php` |
+| `--crud` | `app/Http/Controllers/Api/ModelAController.php`, `ModelBController.php` |
+| `--api` | `routes/lrg_api.php` y una inclusión administrada en `routes/api.php` |
+| Esquema estructural | `.lrg/lrg-index.json`, solo al completar el flujo con éxito |
 
 Si se seleccionan varias operaciones, el comando puede modificar los mismos
-modelos en más de una operación (`relacion` y `fillable`). Las rutas y
-ubicaciones no son configurables por opciones del comando.
+modelos en más de una operación (`relacion` y `fillable`). Antes de aplicarlas,
+las genera sobre copias temporales. Las rutas y ubicaciones no son
+configurables por opciones del comando. Los controladores o archivos de rutas
+manuales incompatibles se rechazan, no se sobrescriben.
 
 ## 11. Ejemplos de uso
 
@@ -326,8 +333,18 @@ Generar todo (aceptando la selección predeterminada `todo`):
 php artisan relation:make User Post 1:N
 ```
 
-Cuando se solicite la selección, introducir `todo`. La dirección de la clave
-foránea se determina desde las migraciones, sin pedir el nombre de la tabla.
+Cuando se solicite la selección, introducir `todo`. Esto conserva las cuatro
+operaciones heredadas; no genera CRUD.
+
+Generar relación, fillables, CRUD y rutas API sin preguntas:
+
+```bash
+php artisan relation:make Category Product 1:N --crud --api
+```
+
+`--crud` sin `--api` genera los controladores, pero no registra rutas. Usar
+`--api` sin `--crud` se rechaza. Los modelos y migraciones deben existir; LRG
+no crea modelos, tablas ni ejecuta migraciones.
 
 Generar únicamente relaciones y `$fillable`:
 
@@ -350,43 +367,52 @@ previamente en `ConsultasController`.
 Estos puntos describen el comportamiento del código actual, no capacidades
 implícitas de Laravel:
 
-1. **Edición acotada de modelos.** Las relaciones y `$fillable` usan el
-   tokenizer de PHP y rechazan estructuras que no pueden editar con seguridad.
-   Los generadores heredados de consultas y rutas conservan sus ediciones
-   textuales.
-2. **Convenciones rígidas de proyecto.** Se esperan modelos en
-   `app/Models`, clases bajo `App\Models`, un controlador específico y
-   `routes/web.php`.
-3. **Análisis estructural acotado.** `getColumns()` sigue disponible como API
-   legado textual; `analyze()` cubre solo el subconjunto estático descrito en
-   la sección 14.
-4. **Límites de Eloquent.** No se generan relaciones con claves compuestas.
-   La configuración de fillable es estructural, no una política de acceso ni
-   de autorización.
-5. **Consultas y rutas fijas.** Se generan consultas `get()` sin filtros,
-   paginación o autorización, y rutas GET sin middleware ni nombres.
-6. **Generadores heredados.** Consultas y rutas conservan sus comprobaciones
-   textuales e idempotencia limitada.
-7. **Escrituras por archivo.** Las ediciones individuales usan archivo
-   temporal y reemplazo; un fallo del segundo modelo no revierte un primer
-   archivo ya actualizado.
-8. **Selección interactiva solamente.** Los elementos no son opciones CLI
-   independientes; una automatización debe responder al prompt.
-9. **Modelo cargable para tablas personalizadas.** Si un modelo configura una
-   tabla no convencional, debe poder cargarse para que el comando use su
-   `getTable()`; de lo contrario se usa la convención Laravel.
-10. **Pruebas.** `php tests/run.php` cubre parser, índice y generadores; la
-    prueba de consultas Eloquent/SQLite se ejecuta con el autoloader de
-    `illuminate/database`.
+1. **Análisis acotado.** `getColumns()` sigue disponible como API legado
+   textual; `analyze()` solo admite el subconjunto estático documentado en la
+   sección 14. Lógica dinámica, SQL crudo y helpers de esquema desconocidos se
+   rechazan.
+2. **Convenciones de proyecto.** Se requieren modelos en `app/Models` y bajo
+   `App\Models`; controladores API usan el namespace
+   `App\Http\Controllers\Api`.
+3. **Límites de Eloquent.** No se generan relaciones con claves compuestas ni
+   CRUD para tablas pivote. CRUD requiere una PK simple autogenerada o con
+   valor predeterminado; claves primarias asignadas por lógica del modelo no
+   se infieren.
+4. **Relaciones CRUD.** Las FK compuestas no se traducen a reglas `exists`.
+   Los modelos de tablas con `deleted_at` deben declarar el trait
+   `SoftDeletes`; tablas con solo una de las columnas `created_at` /
+   `updated_at` se rechazan. No se generan transacciones de negocio ni
+   operaciones API de asociación N:M.
+5. **Validación.** Las reglas derivan de tipos, longitudes, nulabilidad,
+   defaults, unsigned, enum, claves únicas simples/compuestas y FK admitidas.
+   La precisión decimal se acota cuando el lector la conoce. Tipos binarios,
+   identificadores de campo no convencionales y restricciones que no puedan
+   traducirse de forma fiable causan rechazo; la base de datos conserva la
+   garantía final y sus conflictos de integridad se responden con HTTP 409.
+6. **Seguridad de asignación.** `$fillable` es estructural, no una política de
+   autorización. Revisa campos sensibles antes de exponer CRUD. No se genera
+   login, middleware, permisos ni reglas particulares.
+7. **Generadores heredados.** `QueryGenerator` y `RouteGenerator` mantienen
+   su comportamiento de consultas `get()` y rutas GET sin filtros,
+   paginación o autorización. La modalidad `--crud` no los invoca.
+8. **Conflictos.** Un método, allowlist, controlador, ruta o configuración
+   manual incompatible bloquea la operación completa. Los grupos de rutas
+   dinámicos y configuraciones Laravel API no reconocibles se rechazan en vez
+   de considerarse cargados.
+9. **Pruebas.** `php tests/run.php` cubre análisis y generadores;
+   `php tests/full_generation_integration.php <autoload>` valida el comando,
+   migraciones, rutas y HTTP en un Laravel disponible. Las versiones exactas
+   comprobadas se indican al final de este documento.
 
 ## 13. Estado de referencia
 
-- Baseline inicial: `v1.1.0`; el análisis estructural de la sección siguiente
-  es el primer incremento funcional de LRG 2.0.
-- El comando conserva los tres argumentos posicionales y agrega una selección
-  interactiva.
-- No se cambia la firma del comando ni la selección interactiva. Las
-  relaciones y `$fillable` ya consumen metadatos estructurales.
+- Baseline: `v1.1.0`; el comando conserva sus tres argumentos posicionales y
+  su selección interactiva heredada.
+- La modalidad nueva es `relation:make ModelA ModelB cardinality --crud
+  [--api]`.
+- Los seis incrementos funcionales de LRG 2.0 están implementados en este
+  checkout: análisis, índice, relaciones/fillables, CRUD, rutas API e
+  integración transaccional del comando.
 
 ## 14. Análisis estructural de migraciones (primer incremento LRG 2.0)
 
@@ -502,7 +528,7 @@ pudo determinarse. No devuelve un esquema parcial con apariencia de completo.
 La implementación verifica la existencia de tablas/columnas referidas y la
 aridad de las claves foráneas al finalizar el recorrido.
 
-### Pruebas y uso en el siguiente incremento
+### Pruebas estructurales
 
 La suite autocontenida se ejecuta con:
 
@@ -549,24 +575,25 @@ migraciones sin cambios.
 Un índice ausente, dañado o de otra versión se descarta y se reconstruye desde
 las migraciones. El nuevo JSON se escribe en un archivo temporal en el mismo
 directorio y se instala mediante reemplazo; un error al interpretar o construir
-el esquema no reemplaza el índice anterior. El índice solo se actualiza al
-invocar `MigrationReader::analyze()`; el comando `relation:make` lo actualiza
-cuando genera relaciones o `$fillable`.
+el esquema no reemplaza el índice anterior. La firma de `analyze()` acepta un
+tercer booleano opcional `persistIndex`; con `false` permite preparar el
+esquema sin escribir el índice. `relation:make` usa esa modalidad durante la
+planificación y actualiza el índice solo después de aplicar y verificar los
+cambios de modelos, controladores y rutas.
 
 ### Contrato recomendado para consumidores posteriores
 
 ```text
-MigrationReader::analyze(string|array $migrationPaths, ?string $indexPath = null): DatabaseSchema
+MigrationReader::analyze(string|array $migrationPaths, ?string $indexPath = null, bool $persistIndex = true): DatabaseSchema
 DatabaseSchema::$tables: array<string, SchemaTable>
 DatabaseSchema::$relations: list<SchemaRelation>
 DatabaseSchema::$migrationFiles: list<string>
 DatabaseSchema::toArray(): array{tables: array, relations: list<array>, migration_files: list<string>}
 ```
 
-Los consumidores posteriores pueden llamar a `analyze()` y usar directamente
-`DatabaseSchema` o su serialización normalizada. El análisis no ejecuta CRUD
-ni operaciones sobre tablas pivote; el generador de rutas API documentado en
-la sección 17 registra únicamente controladores CRUD preexistentes.
+Los consumidores pueden usar `DatabaseSchema` o su serialización normalizada.
+El analizador no ejecuta CRUD ni migraciones; el generador CRUD consume los
+metadatos existentes y no crea controladores para tablas pivote.
 
 ## 15. Generación estructural de relaciones y `$fillable` (tercer incremento LRG 2.0)
 
@@ -603,11 +630,12 @@ allowlists generadas en busca de credenciales, roles y otros campos cuyo
 control depende de la aplicación.
 
 Las relaciones y fillables se insertan usando el tokenizer de PHP, validando
-la clase y su sintaxis. Los modelos deben existir en `app/Models`. Los cambios
-son atómicos por archivo, pero no hay transacción conjunta entre ambos modelos.
-Los generadores heredados de consultas y rutas, su selección y su flujo se
-mantienen; cuando la relación se genera, el comando comparte sus nombres con
-el generador de consultas.
+la clase y su sintaxis. Los modelos deben existir en `app/Models`. En el
+comando, todas las escrituras se preparan en un directorio temporal y se
+aplican mediante `FileChangeTransaction`; las copias recuperables se mantienen
+hasta verificar también el índice. Los generadores heredados de consultas y
+rutas conservan su comportamiento y selección; cuando se elige `todo`, el
+comando comparte los nombres de relación con el generador de consultas.
 
 La suite estructural se ejecuta con `php tests/run.php`. Las consultas reales
 de Eloquent sobre SQLite se verifican por separado:
@@ -619,40 +647,59 @@ php tests/eloquent_integration.php <ruta-a-vendor/autoload.php>
 La prueba requiere `illuminate/database` y una extensión PDO SQLite disponibles
 en el entorno.
 
-## 17. Generación de rutas CRUD API (quinto incremento LRG 2.0)
+## 17. Controladores CRUD estructurales y rutas API
 
-`ApiRouteGenerator` es intencionalmente independiente del comando
-`relation:make` en este incremento. Se usa después de generar los controladores
-CRUD:
+Con `--crud`, `CrudGenerator` recibe la entidad `SchemaTable` normalizada y
+genera:
 
-```php
-(new ApiRouteGenerator())->generate(base_path(), [
-    App\Models\User::class,
-    App\Models\BlogPost::class,
-]);
+```text
+app/Http/Controllers/Api/{Model}Controller.php
 ```
 
-Para cada modelo calcula un recurso Laravel en snake_case plural (`users`,
-`blog_posts`) y registra `Route::apiResource()` hacia
-`App\Http\Controllers\Api\{Model}Controller`. Esto expone GET colección,
-POST colección, GET recurso, PUT/PATCH recurso y DELETE recurso; Laravel
-resuelve los métodos `index`, `store`, `show`, `update` y `destroy` y no crea
-las acciones web `create`/`edit`.
+Cada controlador implementa `index`, `store`, `show`, `update` y `destroy`.
+Consulta y muta el modelo Eloquent, devuelve JSON y utiliza 201 para creación,
+200 para consulta/actualización, 404 para recursos inexistentes y 204 para
+eliminación. Las validaciones inválidas siguen el comportamiento Laravel 422.
+Los errores de integridad reconocidos de la base se convierten en 409; otras
+`QueryException` se relanzan.
+
+Las reglas cubren los tipos admitidos por `CrudGenerator`, longitudes de
+texto, nulabilidad, campos requeridos, defaults, unsigned, precisión/escala
+decimal, enums, claves foráneas y restricciones `UNIQUE` simples o compuestas.
+Las reglas `unique` de actualización ignoran la PK obtenida del registro
+cargado; no aceptan un identificador de exclusión proporcionado por el cliente.
+Los campos de PK, timestamps y columnas administradas por Eloquent no se
+aceptan como entrada. Sin columnas `created_at`/`updated_at`, el controlador
+desactiva timestamps para la escritura; si solo existe una de las dos, rechaza
+la entidad. Una entidad con `deleted_at` requiere que el modelo ya use
+`SoftDeletes`.
+
+No genera CRUD para pivotes ni tablas sin una PK simple autogenerada o con
+default. No soporta claves foráneas compuestas, ni tipos o identificadores que
+no se puedan validar sin ambigüedad. No agrega políticas de acceso, filtros,
+paginación, autenticación, ni `attach()`, `detach()` o `sync()`. Si el
+controlador ya existe y no es idéntico al generado por LRG, lo conserva y
+rechaza la operación.
+
+Con `--api`, `ApiRouteGenerator` registra cada entidad solicitada mediante
+`Route::apiResource()`. Los recursos usan snake_case plural (`users`,
+`blog_posts`) y publican GET colección, POST colección, GET recurso,
+PUT/PATCH recurso y DELETE recurso, sin las acciones web `create`/`edit`.
+Las invocaciones sucesivas acumulan recursos administrados previamente y no
+duplican rutas.
 
 El generador administra solo el bloque delimitado por marcadores en
 `routes/lrg_api.php`; el contenido manual fuera de ese bloque se conserva.
 Añade una sola inclusión marcada `require_once` al final de `routes/api.php`,
-sin tocar `routes/web.php`. Las escrituras son atómicas individualmente.
-Repetir la misma generación conserva el archivo sin añadir declaraciones.
+sin tocar `routes/web.php`. El archivo API debe existir y estar registrado en
+Laravel.
 
-Antes de escribir comprueba la existencia de cada controlador en
-`app/Http/Controllers/Api`, su namespace/clase y que las cinco acciones
-necesarias sean métodos públicos con PHP válido. Confirma la carga de
-`routes/api.php` mediante la configuración estática `withRouting(api: ...)`
-de Laravel 11+ o el grupo API convencional (`middleware('api')`,
-`prefix('api')`) del `RouteServiceProvider` de Laravel 10. Si el archivo API
-no existe o no puede verificarse su registro, falla con el requisito pendiente
-y no informa éxito.
+Antes de escribir comprueba la carga de `routes/api.php` mediante la
+configuración estática `withRouting(api: ...)` de Laravel 11+ o el grupo API
+convencional (`middleware('api')`, `prefix('api')`) del `RouteServiceProvider`
+de Laravel 10. `withRouting(using: ...)` y otras configuraciones no
+verificables se rechazan. Comprueba también el namespace, clase y cinco
+métodos públicos de todos los controladores CRUD planificados.
 
 Detecta llamadas estáticas de rutas manuales con URI solapada, nombres
 convencionales en uso, importaciones `Route` incompatibles y bloques
@@ -660,19 +707,33 @@ administrados ambiguos. Ante una posible colisión o argumentos dinámicos de
 ruta cuya URI no se pueda determinar, rechaza la generación. No puede resolver
 prefijos de grupos dinámicos, aliases de rutas definidos mediante código
 arbitrario ni colisiones de rutas cargadas desde archivos externos; esos
-patrones requieren revisión manual. Tampoco crea controladores ni rutas
-anidadas/pivote.
+patrones requieren revisión manual.
 
-En este incremento no se modifica `RelationMakeCommand`: el comando principal
-continúa generando únicamente las operaciones anteriores. La integración
-automática de controlador y rutas se deja para el incremento siguiente. El
-generador puede probarse desde una aplicación que ya tenga los controladores:
+## 18. Estabilidad, pruebas y estado de los incrementos
+
+Ejecutar las pruebas autocontenidas y de integración:
 
 ```bash
-php tests/api_routes_integration.php <ruta-a-vendor/autoload.php>
+php tests/run.php
+php tests/full_generation_integration.php <ruta-a-vendor/autoload.php>
 ```
 
-La integración comprueba `route:list` y despacha solicitudes HTTP sobre una
-aplicación Laravel temporal. También se ejecutan pruebas autocontenidas de
-preservación de `routes/web.php`, rutas manuales, idempotencia, configuración
-Laravel 10/11, controladores incompletos y conflictos detectables.
+La integración crea una aplicación temporal con migraciones SQLite, ejecuta
+`relation:make` dos veces para las tres cardinalidades, comprueba los métodos
+Eloquent, `php artisan route:list`, respuestas HTTP, validación de FK/unique,
+actualizaciones parciales, errores de integridad, preservación de rutas web,
+el conflicto con un controlador manual, el rechazo de una migración ambigua y
+una falla controlada después de una escritura parcial; verifica que los
+archivos generados y el índice se recuperen. `tests/run.php` también inyecta
+un fallo de escritura para probar el rollback transaccional directamente.
+
+Combinaciones ejecutadas en este entorno:
+
+- PHP 8.3.33 con Laravel Framework 12.73.0: pruebas integrales aprobadas.
+- PHP 8.3.33 con Laravel Framework 13.43.0: pruebas integrales aprobadas.
+- Los patrones estáticos de registro API para Laravel 10 y 11 se cubren en
+  `tests/run.php`, pero no se ejecutó el flujo integral completo sobre esas
+  versiones ni se validó PHP 8.1/8.2 en este entorno.
+
+Los requisitos declarados del paquete siguen siendo PHP `^8.1` e Illuminate
+10–13; las combinaciones no ejecutadas requieren validación adicional en CI.

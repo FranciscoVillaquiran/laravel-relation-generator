@@ -2,8 +2,13 @@
 
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\MigrationReader;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\CrudGenerator;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\FileChangeTransaction;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\MigrationAnalysisException;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\MigrationParser;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\SchemaColumn;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\SchemaIndex;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\SchemaTable;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\RelationshipGenerator;
 use Franciscovillaquiran\LaravelRelationGenerator\Relations\RelationDefinition;
 
@@ -20,6 +25,8 @@ require_once $root . '/src/Generators/FillableGenerator.php';
 require_once $root . '/src/Generators/RelationshipGenerator.php';
 require_once $root . '/src/Generators/RouteGenerator.php';
 require_once $root . '/src/Generators/ApiRouteGenerator.php';
+require_once $root . '/src/Generators/CrudGenerator.php';
+require_once $root . '/src/Generators/FileChangeTransaction.php';
 require_once $root . '/src/Relations/RelationDefinition.php';
 
 $tests = [];
@@ -532,6 +539,136 @@ $test('generates fillable safely from schema and protects manual configuration',
     }
 });
 
+$test('generates validated idempotent CRUD controllers and protects manual controllers', static function () use ($root): void {
+    $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/migrations');
+    $projectRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-crud-' . bin2hex(random_bytes(6));
+    if (!mkdir($projectRoot)) {
+        throw new RuntimeException("Could not create temporary CRUD project: {$projectRoot}");
+    }
+
+    try {
+        $generator = new CrudGenerator();
+        $posts = $schema->table('posts');
+        $controllerPath = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
+            . DIRECTORY_SEPARATOR . 'PostController.php';
+
+        assertSameValue(true, $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema));
+        $source = file_get_contents($controllerPath);
+        token_get_all($source, TOKEN_PARSE);
+        assertSameValue(true, str_contains($source, 'public function index()'));
+        assertSameValue(true, str_contains($source, 'public function store(Request $request)'));
+        assertSameValue(true, str_contains($source, 'public function show(string $id)'));
+        assertSameValue(true, str_contains($source, 'public function update(Request $request, string $id)'));
+        assertSameValue(true, str_contains($source, 'public function destroy(string $id)'));
+        assertSameValue(true, str_contains($source, "Rule::exists('users', 'id')"));
+        assertSameValue(true, str_contains($source, "\$rules['title'] ="));
+        assertSameValue(false, $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema));
+        assertSameValue($source, file_get_contents($controllerPath));
+
+        $usersController = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
+            . DIRECTORY_SEPARATOR . 'UserController.php';
+        $generator->generateFromTable($projectRoot, 'App\\Models\\User', $schema->table('users'), $schema);
+        $usersSource = file_get_contents($usersController);
+        token_get_all($usersSource, TOKEN_PARSE);
+        assertSameValue(true, str_contains($usersSource, "Rule::unique('users', 'display_name')"));
+        assertSameValue(true, str_contains($usersSource, "'regex:/^-?[0-9]{1,8}(?:\\\\.[0-9]{1,2})?$/'"));
+
+        $manualSource = $source . "// manual edit\n";
+        file_put_contents($controllerPath, $manualSource);
+        try {
+            $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema);
+            throw new RuntimeException('Expected an edited generated controller to be protected.');
+        } catch (RuntimeException $exception) {
+            assertSameValue(true, str_contains($exception->getMessage(), 'already exists'));
+            assertSameValue($manualSource, file_get_contents($controllerPath));
+        }
+
+        try {
+            $generator->generateFromTable(
+                $projectRoot,
+                'App\\Models\\PostTag',
+                $schema->table('post_tag'),
+                $schema
+            );
+            throw new RuntimeException('Expected pivot-table CRUD generation to be rejected.');
+        } catch (RuntimeException $exception) {
+            assertSameValue(true, str_contains($exception->getMessage(), 'pivot table'));
+        }
+
+        $binaryTable = new SchemaTable('binary_records', [
+            'id' => new SchemaColumn('id', 'bigInteger', autoIncrement: true),
+            'payload' => new SchemaColumn('payload', 'binary'),
+        ], [
+            'binary_records_primary' => new SchemaIndex('binary_records_primary', 'primary', ['id'], true),
+        ]);
+        try {
+            $generator->generateFromTable(
+                $projectRoot,
+                'App\\Models\\BinaryRecord',
+                $binaryTable,
+                new \Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\DatabaseSchema()
+            );
+            throw new RuntimeException('Expected unsupported binary validation to be rejected.');
+        } catch (RuntimeException $exception) {
+            assertSameValue(true, str_contains($exception->getMessage(), 'binary column'));
+        }
+    } finally {
+        foreach (new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($projectRoot, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST
+        ) as $entry) {
+            $entry->isDir() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+        }
+        rmdir($projectRoot);
+    }
+});
+
+$test('rolls back all watched files after a controlled write failure', static function (): void {
+    $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-transaction-' . bin2hex(random_bytes(6));
+    if (!mkdir($root)) {
+        throw new RuntimeException("Could not create transaction test directory: {$root}");
+    }
+    $first = $root . DIRECTORY_SEPARATOR . 'first.php';
+    $second = $root . DIRECTORY_SEPARATOR . 'second.php';
+    $new = $root . DIRECTORY_SEPARATOR . 'new.php';
+    $index = $root . DIRECTORY_SEPARATOR . 'index.json';
+    file_put_contents($first, '<?php $value = 1;');
+    file_put_contents($second, '<?php $value = 2;');
+    file_put_contents($index, '{"schema":"original"}');
+    $writes = 0;
+    $transaction = new FileChangeTransaction(static function () use (&$writes): void {
+        if (++$writes === 3) {
+            throw new RuntimeException('controlled write failure');
+        }
+    });
+
+    try {
+        $transaction->watch([$first, $second, $new, $index]);
+        try {
+            $transaction->apply([
+                $first => '<?php $value = 10;',
+                $new => '<?php $value = 30;',
+                $second => '<?php $value = 20;',
+            ]);
+            throw new RuntimeException('Expected the controlled write to fail.');
+        } catch (RuntimeException $exception) {
+            assertSameValue('controlled write failure', $exception->getMessage());
+        }
+        assertSameValue('<?php $value = 1;', file_get_contents($first));
+        assertSameValue('<?php $value = 2;', file_get_contents($second));
+        assertSameValue('{"schema":"original"}', file_get_contents($index));
+        assertSameValue(false, file_exists($new));
+        assertSameValue([], glob($root . DIRECTORY_SEPARATOR . '.lrg-backup-*'));
+    } finally {
+        foreach (glob($root . DIRECTORY_SEPARATOR . '*') ?: [] as $file) {
+            unlink($file);
+        }
+        rmdir($root);
+    }
+});
+
 $test('persists and incrementally refreshes the structural migration index', static function () use ($root): void {
     $temporaryRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-index-' . bin2hex(random_bytes(6));
     $migrationDirectory = $temporaryRoot . DIRECTORY_SEPARATOR . 'migrations';
@@ -548,6 +685,10 @@ $test('persists and incrementally refreshes the structural migration index', sta
                 throw new RuntimeException("Could not copy migration fixture: {$fixture}");
             }
         }
+
+        $deferredIndexPath = $temporaryRoot . DIRECTORY_SEPARATOR . 'deferred' . DIRECTORY_SEPARATOR . 'index.json';
+        (new MigrationReader())->analyze($migrationDirectory, $deferredIndexPath, false);
+        assertSameValue(false, file_exists($deferredIndexPath));
 
         $parser = new class extends MigrationParser {
             public int $calls = 0;
@@ -791,6 +932,7 @@ PHP;
 
     try {
         $generator = new ApiRouteGenerator();
+        $generator->generate($projectRoot, ['App\\Models\\User']);
         $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
         $managedSource = file_get_contents($managedRoutesPath);
         $apiSource = file_get_contents($apiRoutesPath);
@@ -1034,10 +1176,12 @@ exit($failures === [] ? 0 : 1);
 function assertSameValue(mixed $expected, mixed $actual): void
 {
     if ($expected !== $actual) {
+        $line = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 1)[0]['line'] ?? 0;
         throw new RuntimeException(sprintf(
-            "Expected %s, got %s",
+            "Expected %s, got %s at test line %d",
             var_export($expected, true),
-            var_export($actual, true)
+            var_export($actual, true),
+            $line
         ));
     }
 }
