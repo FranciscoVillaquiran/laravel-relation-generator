@@ -24,6 +24,9 @@ $modelsPath = $temporaryRoot . DIRECTORY_SEPARATOR . 'Models';
 if (!mkdir($modelsPath, 0777, true)) {
     throw new RuntimeException("Could not create temporary Eloquent test directory: {$modelsPath}");
 }
+if (function_exists('base_path') && class_exists(\Illuminate\Foundation\Application::class)) {
+    new \Illuminate\Foundation\Application($temporaryRoot);
+}
 
 try {
     $models = [
@@ -144,6 +147,11 @@ PHP);
     }
     if (is_file($customMigration ?? '')) {
         unlink($customMigration);
+    }
+    $indexPath = $temporaryRoot . DIRECTORY_SEPARATOR . '.lrg' . DIRECTORY_SEPARATOR . 'lrg-index.json';
+    if (is_file($indexPath)) {
+        unlink($indexPath);
+        rmdir(dirname($indexPath));
     }
     rmdir($modelsPath);
     rmdir($temporaryRoot);

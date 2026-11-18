@@ -23,7 +23,11 @@ class StructuralSchemaIndex
     /**
      * @param list<string> $migrationFiles
      */
-    public function analyze(array $migrationFiles, MigrationParser $parser): DatabaseSchema
+    public function analyze(
+        array $migrationFiles,
+        MigrationParser $parser,
+        bool $persistIndex = true
+    ): DatabaseSchema
     {
         $cachedIndex = $this->readIndex();
         $cachedMigrations = [];
@@ -75,7 +79,9 @@ class StructuralSchemaIndex
         }
 
         $schema = (new SchemaBuilder())->build($operations, $migrationFiles);
-        $this->writeIndex($migrationEntries, $schema);
+        if ($persistIndex) {
+            $this->writeIndex($migrationEntries, $schema);
+        }
 
         return $schema;
     }

@@ -1,9 +1,8 @@
 # Laravel Relation Generator
 
 This package provides the `relation:make` Artisan command for generating Eloquent
-relationships, `$fillable` properties, query methods, and web routes. A separate
-API route generator can register existing CRUD controllers without changing the
-legacy command workflow.
+relationships, `$fillable` properties, structural CRUD controllers, and API routes,
+while preserving the legacy query and web-route workflow.
 
 ## Requirements
 
@@ -19,7 +18,7 @@ php artisan relation:make ModelA ModelB 1:N
 ```
 
 After entering the command, choose `todo` (the default) to generate all supported
-elements, or enter a comma-separated selection:
+legacy elements, or enter a comma-separated selection:
 
 - `relacion`: relationship methods on both models
 - `fillable`: `$fillable` properties generated from the structural schema
@@ -29,6 +28,23 @@ elements, or enter a comma-separated selection:
 For example, `relacion, fillable` generates only the model relationships and
 fillable properties. `consultas` assumes the corresponding model relationships
 already exist, and `rutas` assumes the controller query methods are available.
+`todo` retains its original meaning and does not include CRUD.
+
+Generate relationships, fillables, CRUD controllers for both models, and API
+routes without an interactive prompt:
+
+```bash
+php artisan relation:make Category Product 1:N --crud --api
+```
+
+`--crud` generates controllers without registering API routes.
+`--api` requires `--crud`. Models and migration files must already exist;
+LRG does not create models or migrations, or run migrations.
+
+Generation is prepared in temporary copies, then applied with recoverable
+backups. If validation, a write, schema verification, or index update fails,
+LRG restores the previous project files. The structural index
+`.lrg/lrg-index.json` is updated only after generation succeeds.
 
 The package follows semantic versioning through Git tags (`vMAJOR.MINOR.PATCH`).
 
@@ -48,34 +64,38 @@ Run the self-contained reader tests with:
 php tests/run.php
 ```
 
-`relation:make` uses the structural schema for relationship and fillable
-generation. The Eloquent/SQLite integration test is available as
+`relation:make` uses the structural schema for relationships, fillables, and
+CRUD generation. The Eloquent/SQLite integration test is available as
 `php tests/eloquent_integration.php <path-to-vendor/autoload.php>` when
 `illuminate/database` and PDO SQLite are installed.
 
-## API route generation
+The full command integration test runs against a Laravel autoloader:
 
-The API route generator is deliberately separate from `relation:make` for this
-increment. It preserves `RouteGenerator` and `routes/web.php` behavior:
+```bash
+php tests/full_generation_integration.php <path-to-vendor/autoload.php>
+```
+
+It exercises all three cardinalities, CRUD HTTP responses, `route:list`,
+idempotency, manual conflicts, migration ambiguity, and rollback after a
+controlled write failure. The supported package
+constraints remain PHP `^8.1` and Laravel 10–13; this integration has been run
+on PHP 8.3.33 with Laravel 12.73.0 and 13.43.0.
+
+## API route organization
+
+The command manages resources in `routes/lrg_api.php` and adds a marked
+`require_once` include to `routes/api.php`. It preserves manual routes and
+`routes/web.php`. Laravel must already load `routes/api.php`; configurations
+that cannot be verified are rejected.
 
 ```php
 (new \Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator())
     ->generate(base_path(), ['App\\Models\\User', 'App\\Models\\BlogPost']);
 ```
 
-It manages `routes/lrg_api.php` and inserts one marked `require_once` in
-`routes/api.php`. The API route file must already be registered in
-`bootstrap/app.php` (Laravel 11+) or `app/Providers/RouteServiceProvider.php`
-(Laravel 10); ambiguous or disabled API routing is rejected. CRUD controllers
-must exist under `app/Http/Controllers/Api` and expose public `index`, `store`,
-`show`, `update`, and `destroy` methods. Existing manual routes and controllers
-are preserved; detected URI/name conflicts fail rather than being duplicated.
-
-Verify generation and dispatch against a Laravel autoloader with:
-
-```bash
-php tests/api_routes_integration.php <path-to-vendor/autoload.php>
-```
+The API route generator is also available independently when CRUD controllers
+already exist. The command's CRUD generator refuses to overwrite a manual
+controller and does not create CRUD for pivot tables.
 
 ## Project documentation
 
