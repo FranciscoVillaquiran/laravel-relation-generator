@@ -334,6 +334,24 @@ class MigrationParser
             ];
         }
 
+        if ($method === 'rememberToken') {
+            $this->assertArgumentCount($first['arguments'], 0, 0, $line, $description);
+
+            return $this->columnStatement([
+                [
+                    'method' => 'string',
+                    'arguments' => ['remember_token', 100],
+                    'line' => $line,
+                ],
+                [
+                    'method' => 'nullable',
+                    'arguments' => [],
+                    'line' => $line,
+                ],
+                ...array_slice($calls, 1),
+            ], $structure);
+        }
+
         if (isset(self::COLUMN_TYPES[$method])) {
             return $this->columnStatement($calls, $structure);
         }
