@@ -20,6 +20,8 @@ usuario, puede:
 2. Crear o actualizar las propiedades `$fillable` leyendo las migraciones.
 3. Añadir métodos de consulta a `ConsultasController`.
 4. Añadir rutas GET a `routes/web.php`.
+5. Registrar controladores CRUD existentes en rutas API usando un generador
+   independiente.
 
 No crea modelos ni migraciones, no ejecuta migraciones y no configura
 controladores o rutas que no estén dentro de estas operaciones. Modifica los
@@ -33,6 +35,7 @@ src/
 ├── Console/Commands/RelationMakeCommand.php
 ├── Generators/
 │   ├── FillableGenerator.php
+│   ├── ApiRouteGenerator.php
 │   ├── MigrationReader.php
 │   ├── QueryGenerator.php
 │   ├── RelationshipGenerator.php
@@ -58,6 +61,7 @@ src/
 | `Generators/FillableGenerator.php` | Construye y escribe `$fillable` en un modelo. |
 | `Generators/QueryGenerator.php` | Crea o actualiza `ConsultasController` con métodos que cargan relaciones. |
 | `Generators/RouteGenerator.php` | Añade rutas GET que apuntan a los métodos del controlador. |
+| `Generators/ApiRouteGenerator.php` | Mantiene los recursos CRUD en `routes/lrg_api.php` y registra una inclusión en `routes/api.php`, separado por ahora de `relation:make`. |
 
 El autoload PSR-4 del paquete usa el prefijo
 `Franciscovillaquiran\LaravelRelationGenerator\` para el directorio `src/`.
@@ -254,7 +258,7 @@ allowlist generada.
 
 ## 8. Cómo se genera `ConsultasController`
 
-La ruta de destino es fija:
+La ruta web heredada de destino es fija:
 
 ```text
 app/Http/Controllers/ConsultasController.php
@@ -298,7 +302,8 @@ por lo que depende de que esté disponible como alias en la aplicación Laravel.
 
 La detección de duplicados de rutas es textual. Las rutas se agregan al final
 del contenido existente; no se inspeccionan grupos, middleware, nombres de
-ruta, controladores invocables ni configuración de API.
+ruta, controladores invocables ni configuración de API. Esta funcionalidad
+heredada permanece independiente de las rutas CRUD API.
 
 ## 10. Archivos de la aplicación que puede modificar
 
@@ -559,8 +564,9 @@ DatabaseSchema::toArray(): array{tables: array, relations: list<array>, migratio
 ```
 
 Los consumidores posteriores pueden llamar a `analyze()` y usar directamente
-`DatabaseSchema` o su serialización normalizada. No se implementan CRUD,
-rutas API ni operaciones de controladores sobre tablas pivote.
+`DatabaseSchema` o su serialización normalizada. El análisis no ejecuta CRUD
+ni operaciones sobre tablas pivote; el generador de rutas API documentado en
+la sección 17 registra únicamente controladores CRUD preexistentes.
 
 ## 15. Generación estructural de relaciones y `$fillable` (tercer incremento LRG 2.0)
 
@@ -612,3 +618,61 @@ php tests/eloquent_integration.php <ruta-a-vendor/autoload.php>
 
 La prueba requiere `illuminate/database` y una extensión PDO SQLite disponibles
 en el entorno.
+
+## 17. Generación de rutas CRUD API (quinto incremento LRG 2.0)
+
+`ApiRouteGenerator` es intencionalmente independiente del comando
+`relation:make` en este incremento. Se usa después de generar los controladores
+CRUD:
+
+```php
+(new ApiRouteGenerator())->generate(base_path(), [
+    App\Models\User::class,
+    App\Models\BlogPost::class,
+]);
+```
+
+Para cada modelo calcula un recurso Laravel en snake_case plural (`users`,
+`blog_posts`) y registra `Route::apiResource()` hacia
+`App\Http\Controllers\Api\{Model}Controller`. Esto expone GET colección,
+POST colección, GET recurso, PUT/PATCH recurso y DELETE recurso; Laravel
+resuelve los métodos `index`, `store`, `show`, `update` y `destroy` y no crea
+las acciones web `create`/`edit`.
+
+El generador administra solo el bloque delimitado por marcadores en
+`routes/lrg_api.php`; el contenido manual fuera de ese bloque se conserva.
+Añade una sola inclusión marcada `require_once` al final de `routes/api.php`,
+sin tocar `routes/web.php`. Las escrituras son atómicas individualmente.
+Repetir la misma generación conserva el archivo sin añadir declaraciones.
+
+Antes de escribir comprueba la existencia de cada controlador en
+`app/Http/Controllers/Api`, su namespace/clase y que las cinco acciones
+necesarias sean métodos públicos con PHP válido. Confirma la carga de
+`routes/api.php` mediante la configuración estática `withRouting(api: ...)`
+de Laravel 11+ o el grupo API convencional (`middleware('api')`,
+`prefix('api')`) del `RouteServiceProvider` de Laravel 10. Si el archivo API
+no existe o no puede verificarse su registro, falla con el requisito pendiente
+y no informa éxito.
+
+Detecta llamadas estáticas de rutas manuales con URI solapada, nombres
+convencionales en uso, importaciones `Route` incompatibles y bloques
+administrados ambiguos. Ante una posible colisión o argumentos dinámicos de
+ruta cuya URI no se pueda determinar, rechaza la generación. No puede resolver
+prefijos de grupos dinámicos, aliases de rutas definidos mediante código
+arbitrario ni colisiones de rutas cargadas desde archivos externos; esos
+patrones requieren revisión manual. Tampoco crea controladores ni rutas
+anidadas/pivote.
+
+En este incremento no se modifica `RelationMakeCommand`: el comando principal
+continúa generando únicamente las operaciones anteriores. La integración
+automática de controlador y rutas se deja para el incremento siguiente. El
+generador puede probarse desde una aplicación que ya tenga los controladores:
+
+```bash
+php tests/api_routes_integration.php <ruta-a-vendor/autoload.php>
+```
+
+La integración comprueba `route:list` y despacha solicitudes HTTP sobre una
+aplicación Laravel temporal. También se ejecutan pruebas autocontenidas de
+preservación de `routes/web.php`, rutas manuales, idempotencia, configuración
+Laravel 10/11, controladores incompletos y conflictos detectables.

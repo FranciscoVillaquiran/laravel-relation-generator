@@ -1,7 +1,9 @@
 # Laravel Relation Generator
 
 This package provides the `relation:make` Artisan command for generating Eloquent
-relationships, `$fillable` properties, query methods, and routes.
+relationships, `$fillable` properties, query methods, and web routes. A separate
+API route generator can register existing CRUD controllers without changing the
+legacy command workflow.
 
 ## Requirements
 
@@ -50,6 +52,30 @@ php tests/run.php
 generation. The Eloquent/SQLite integration test is available as
 `php tests/eloquent_integration.php <path-to-vendor/autoload.php>` when
 `illuminate/database` and PDO SQLite are installed.
+
+## API route generation
+
+The API route generator is deliberately separate from `relation:make` for this
+increment. It preserves `RouteGenerator` and `routes/web.php` behavior:
+
+```php
+(new \Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator())
+    ->generate(base_path(), ['App\\Models\\User', 'App\\Models\\BlogPost']);
+```
+
+It manages `routes/lrg_api.php` and inserts one marked `require_once` in
+`routes/api.php`. The API route file must already be registered in
+`bootstrap/app.php` (Laravel 11+) or `app/Providers/RouteServiceProvider.php`
+(Laravel 10); ambiguous or disabled API routing is rejected. CRUD controllers
+must exist under `app/Http/Controllers/Api` and expose public `index`, `store`,
+`show`, `update`, and `destroy` methods. Existing manual routes and controllers
+are preserved; detected URI/name conflicts fail rather than being duplicated.
+
+Verify generation and dispatch against a Laravel autoloader with:
+
+```bash
+php tests/api_routes_integration.php <path-to-vendor/autoload.php>
+```
 
 ## Project documentation
 

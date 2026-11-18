@@ -1,6 +1,7 @@
 <?php
 
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\MigrationReader;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\MigrationAnalysisException;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\MigrationParser;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\RelationshipGenerator;
@@ -17,6 +18,8 @@ require_once $root . '/src/Generators/MigrationReader.php';
 require_once $root . '/src/Generators/ModelSourceEditor.php';
 require_once $root . '/src/Generators/FillableGenerator.php';
 require_once $root . '/src/Generators/RelationshipGenerator.php';
+require_once $root . '/src/Generators/RouteGenerator.php';
+require_once $root . '/src/Generators/ApiRouteGenerator.php';
 require_once $root . '/src/Relations/RelationDefinition.php';
 
 $tests = [];
@@ -736,6 +739,284 @@ $test('preserves existing relationship generator naming behavior', static functi
     );
 });
 
+$test('generates API resources without changing web routes and protects manual routes', static function (): void {
+    $projectRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-api-routes-' . bin2hex(random_bytes(6));
+    $routesPath = $projectRoot . DIRECTORY_SEPARATOR . 'routes';
+    $controllersPath = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR
+        . 'Http' . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api';
+    $bootstrapPath = $projectRoot . DIRECTORY_SEPARATOR . 'bootstrap';
+    foreach ([$routesPath, $controllersPath, $bootstrapPath] as $directory) {
+        if (!mkdir($directory, 0777, true) && !is_dir($directory)) {
+            throw new RuntimeException("Could not create API route fixture directory: {$directory}");
+        }
+    }
+
+    $apiRoutesPath = $routesPath . DIRECTORY_SEPARATOR . 'api.php';
+    $managedRoutesPath = $routesPath . DIRECTORY_SEPARATOR . 'lrg_api.php';
+    $webRoutesPath = $routesPath . DIRECTORY_SEPARATOR . 'web.php';
+    file_put_contents(
+        $bootstrapPath . DIRECTORY_SEPARATOR . 'app.php',
+        "<?php\nreturn Application::configure(basePath: dirname(__DIR__))"
+            . "->withRouting(api: __DIR__ . '/../routes/api.php')->create();\n"
+    );
+    $apiOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+        . "Route::get('/health', fn () => 'ok');\n"
+        . "Route::match(['OPTIONS'], '/users', fn () => null);\n";
+    $managedManualOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\nRoute::get('/local-health', fn () => 'ok');\n";
+    $webOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\nRoute::get('/', fn () => 'home');\n";
+    file_put_contents($apiRoutesPath, $apiOriginal);
+    file_put_contents($managedRoutesPath, $managedManualOriginal);
+    file_put_contents($webRoutesPath, $webOriginal);
+
+    $controllerTemplate = <<<'PHP'
+<?php
+
+namespace App\Http\Controllers\Api;
+
+class %sController
+{
+    public function index() {}
+    public function store() {}
+    public function show() {}
+    public function update() {}
+    public function destroy() {}
+}
+PHP;
+    foreach (['User', 'BlogPost'] as $model) {
+        file_put_contents(
+            $controllersPath . DIRECTORY_SEPARATOR . $model . 'Controller.php',
+            sprintf($controllerTemplate, $model)
+        );
+    }
+
+    try {
+        $generator = new ApiRouteGenerator();
+        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
+        $managedSource = file_get_contents($managedRoutesPath);
+        $apiSource = file_get_contents($apiRoutesPath);
+
+        assertRouteContains('use Illuminate\\Support\\Facades\\Route;', $managedSource);
+        assertRouteContains(
+            "Route::apiResource('users', \\App\\Http\\Controllers\\Api\\UserController::class);",
+            $managedSource
+        );
+        assertRouteContains(
+            "Route::apiResource('blog_posts', \\App\\Http\\Controllers\\Api\\BlogPostController::class);",
+            $managedSource
+        );
+        assertRouteContains("Route::get('/local-health'", $managedSource);
+        assertRouteContains("Route::get('/health'", $apiSource);
+        assertSameValue(1, substr_count($apiSource, 'lrg_api.php'));
+
+        $generatedApi = $apiSource;
+        $generatedManaged = $managedSource;
+        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
+        assertSameValue($generatedApi, file_get_contents($apiRoutesPath));
+        assertSameValue($generatedManaged, file_get_contents($managedRoutesPath));
+        assertSameValue($webOriginal, file_get_contents($webRoutesPath));
+
+        (new Franciscovillaquiran\LaravelRelationGenerator\Generators\RouteGenerator())->generate(
+            $webRoutesPath,
+            'User',
+            'BlogPost'
+        );
+        $webWithLegacyRoutes = file_get_contents($webRoutesPath);
+        assertRouteContains('/consultas/user-blog-post', $webWithLegacyRoutes);
+        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
+        assertSameValue($webWithLegacyRoutes, file_get_contents($webRoutesPath));
+
+        file_put_contents(
+            $apiRoutesPath,
+            rtrim(file_get_contents($apiRoutesPath))
+                . "\nRoute::delete('/users/{user}', fn () => null);\n"
+        );
+        $beforeConflict = file_get_contents($managedRoutesPath);
+        try {
+            $generator->generate($projectRoot, ['App\\Models\\User']);
+            throw new RuntimeException('Expected an overlapping API route to be rejected.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'Route conflict')) {
+                throw new RuntimeException('Unexpected API conflict result: ' . $exception->getMessage());
+            }
+            assertSameValue($beforeConflict, file_get_contents($managedRoutesPath));
+        }
+
+        $apiWithoutUriConflict = str_replace(
+            "\nRoute::delete('/users/{user}', fn () => null);\n",
+            "\n",
+            file_get_contents($apiRoutesPath)
+        );
+        file_put_contents(
+            $apiRoutesPath,
+            rtrim($apiWithoutUriConflict) . "\nRoute::get('/other')->name('users.index');\n"
+        );
+        try {
+            $generator->generate($projectRoot, ['App\\Models\\User']);
+            throw new RuntimeException('Expected an API route name conflict to be rejected.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'Route name conflict')) {
+                throw new RuntimeException('Unexpected API route name result: ' . $exception->getMessage());
+            }
+        }
+
+        file_put_contents(
+            $controllersPath . DIRECTORY_SEPARATOR . 'PrivateController.php',
+            str_replace('public function destroy()', 'private function destroy()', sprintf($controllerTemplate, 'Private'))
+        );
+        try {
+            $generator->generate($projectRoot, ['App\\Models\\Private']);
+            throw new RuntimeException('Expected a controller missing a public action to be rejected.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'missing public actions')) {
+                throw new RuntimeException('Unexpected controller validation result: ' . $exception->getMessage());
+            }
+        }
+
+        $disabledRoot = $projectRoot . DIRECTORY_SEPARATOR . 'api-disabled';
+        mkdir($disabledRoot . DIRECTORY_SEPARATOR . 'routes', 0777, true);
+        mkdir($disabledRoot . DIRECTORY_SEPARATOR . 'bootstrap', 0777, true);
+        file_put_contents($disabledRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php', "<?php\n");
+        file_put_contents($disabledRoot . DIRECTORY_SEPARATOR . 'bootstrap' . DIRECTORY_SEPARATOR . 'app.php', "<?php\nreturn Application::configure()->withRouting(web: 'routes/web.php')->create();");
+        try {
+            $generator->generate($disabledRoot, ['App\\Models\\User']);
+            throw new RuntimeException('Expected an unregistered API routes file to be rejected.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'Could not verify')) {
+                throw new RuntimeException('Unexpected API registration result: ' . $exception->getMessage());
+            }
+            assertSameValue(false, file_exists($disabledRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'lrg_api.php'));
+        }
+
+        $customRoutingRoot = $projectRoot . DIRECTORY_SEPARATOR . 'custom-routing';
+        mkdir($customRoutingRoot . DIRECTORY_SEPARATOR . 'routes', 0777, true);
+        mkdir($customRoutingRoot . DIRECTORY_SEPARATOR . 'bootstrap', 0777, true);
+        file_put_contents($customRoutingRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php', "<?php\n");
+        file_put_contents(
+            $customRoutingRoot . DIRECTORY_SEPARATOR . 'bootstrap' . DIRECTORY_SEPARATOR . 'app.php',
+            "<?php\nApplication::configure()->withRouting(using: function () {}, api: __DIR__ . '/../routes/api.php');\n"
+        );
+        try {
+            $generator->generate($customRoutingRoot, ['App\\Models\\User']);
+            throw new RuntimeException('Expected custom Laravel routing to be rejected as ambiguous.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'Could not verify')) {
+                throw new RuntimeException('Unexpected custom routing result: ' . $exception->getMessage());
+            }
+            assertSameValue(false, file_exists($customRoutingRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'lrg_api.php'));
+        }
+
+        $providerRoot = $projectRoot . DIRECTORY_SEPARATOR . 'laravel-10';
+        $providerRoutes = $providerRoot . DIRECTORY_SEPARATOR . 'routes';
+        $providerDirectory = $providerRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Providers';
+        $providerControllers = $providerRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR
+            . 'Http' . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api';
+        mkdir($providerRoutes, 0777, true);
+        mkdir($providerDirectory, 0777, true);
+        mkdir($providerControllers, 0777, true);
+        file_put_contents($providerRoutes . DIRECTORY_SEPARATOR . 'api.php', "<?php\n");
+        file_put_contents(
+            $providerDirectory . DIRECTORY_SEPARATOR . 'RouteServiceProvider.php',
+            "<?php\nRoute::middleware('api')->prefix('api')->group(base_path('routes/api.php'));\n"
+        );
+        file_put_contents(
+            $providerControllers . DIRECTORY_SEPARATOR . 'UserController.php',
+            sprintf($controllerTemplate, 'User')
+        );
+        $generator->generate($providerRoot, ['App\\Models\\User']);
+        assertSameValue(
+            true,
+            file_exists($providerRoutes . DIRECTORY_SEPARATOR . 'lrg_api.php')
+        );
+    } finally {
+        foreach (glob($controllersPath . DIRECTORY_SEPARATOR . '*.php') ?: [] as $controller) {
+            unlink($controller);
+        }
+        foreach ([$apiRoutesPath, $managedRoutesPath, $webRoutesPath] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+        if (is_file($bootstrapPath . DIRECTORY_SEPARATOR . 'app.php')) {
+            unlink($bootstrapPath . DIRECTORY_SEPARATOR . 'app.php');
+        }
+        foreach ([
+            $controllersPath,
+            dirname($controllersPath),
+            dirname(dirname($controllersPath)),
+            dirname(dirname(dirname($controllersPath))),
+            $bootstrapPath,
+            $routesPath,
+        ] as $directory) {
+            if (is_dir($directory)) {
+                rmdir($directory);
+            }
+        }
+        $disabledRoutes = $projectRoot . DIRECTORY_SEPARATOR . 'api-disabled' . DIRECTORY_SEPARATOR . 'routes';
+        if (is_file($disabledRoutes . DIRECTORY_SEPARATOR . 'api.php')) {
+            unlink($disabledRoutes . DIRECTORY_SEPARATOR . 'api.php');
+        }
+        if (is_dir($disabledRoutes)) {
+            rmdir($disabledRoutes);
+        }
+        $disabledBootstrap = dirname($disabledRoutes) . DIRECTORY_SEPARATOR . 'bootstrap';
+        if (is_file($disabledBootstrap . DIRECTORY_SEPARATOR . 'app.php')) {
+            unlink($disabledBootstrap . DIRECTORY_SEPARATOR . 'app.php');
+        }
+        if (is_dir($disabledBootstrap)) {
+            rmdir($disabledBootstrap);
+        }
+        if (is_dir(dirname($disabledRoutes))) {
+            rmdir(dirname($disabledRoutes));
+        }
+        $customRoutingRoot = $projectRoot . DIRECTORY_SEPARATOR . 'custom-routing';
+        foreach ([
+            $customRoutingRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php',
+            $customRoutingRoot . DIRECTORY_SEPARATOR . 'bootstrap' . DIRECTORY_SEPARATOR . 'app.php',
+        ] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
+        }
+        foreach ([
+            $customRoutingRoot . DIRECTORY_SEPARATOR . 'routes',
+            $customRoutingRoot . DIRECTORY_SEPARATOR . 'bootstrap',
+            $customRoutingRoot,
+        ] as $directory) {
+            if (is_dir($directory)) {
+                rmdir($directory);
+            }
+        }
+        if (isset($providerRoutes)) {
+            foreach ([
+                $providerRoutes . DIRECTORY_SEPARATOR . 'api.php',
+                $providerRoutes . DIRECTORY_SEPARATOR . 'lrg_api.php',
+                $providerDirectory . DIRECTORY_SEPARATOR . 'RouteServiceProvider.php',
+                $providerControllers . DIRECTORY_SEPARATOR . 'UserController.php',
+            ] as $file) {
+                if (is_file($file)) {
+                    unlink($file);
+                }
+            }
+            foreach ([
+                $providerControllers,
+                dirname($providerControllers),
+                dirname(dirname($providerControllers)),
+                $providerDirectory,
+                $providerRoot . DIRECTORY_SEPARATOR . 'app',
+                $providerRoutes,
+                $providerRoot,
+            ] as $directory) {
+                if (is_dir($directory)) {
+                    rmdir($directory);
+                }
+            }
+        }
+        if (is_dir($projectRoot)) {
+            rmdir($projectRoot);
+        }
+    }
+});
+
 $failures = [];
 foreach ($tests as $name => $callback) {
     try {
@@ -758,5 +1039,12 @@ function assertSameValue(mixed $expected, mixed $actual): void
             var_export($expected, true),
             var_export($actual, true)
         ));
+    }
+}
+
+function assertRouteContains(string $expected, string $actual): void
+{
+    if (!str_contains($actual, $expected)) {
+        throw new RuntimeException("Expected generated route file to contain: {$expected}");
     }
 }
