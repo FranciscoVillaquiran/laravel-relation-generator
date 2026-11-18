@@ -57,6 +57,43 @@ $test('reads normalized columns, types, lengths, precision, nullability and defa
     assertSameValue(true, $users->columns['id']->unsigned);
 });
 
+$test('analyzes the default Laravel users migration including rememberToken', static function () use ($root): void {
+    $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/laravel_default_users_migration.php');
+    $users = $schema->table('users');
+    $rememberToken = $users->columns['remember_token'];
+
+    assertSameValue('string', $rememberToken->type);
+    assertSameValue(100, $rememberToken->length);
+    assertSameValue(true, $rememberToken->nullable);
+    assertSameValue(true, $users->columns['email_verified_at']->nullable);
+    assertSameValue(
+        ['users', 'password_reset_tokens', 'sessions', 'cache', 'cache_locks', 'jobs', 'job_batches', 'failed_jobs'],
+        array_keys($schema->tables)
+    );
+    assertSameValue(true, $schema->table('sessions')->columns['user_id']->nullable);
+    assertSameValue(true, $schema->table('jobs')->columns['attempts']->unsigned);
+    assertSameValue('CURRENT_TIMESTAMP', $schema->table('failed_jobs')->columns['failed_at']->default);
+
+    $modelsPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-default-users-' . bin2hex(random_bytes(6));
+    if (!mkdir($modelsPath)) {
+        throw new RuntimeException("Could not create temporary models directory: {$modelsPath}");
+    }
+    $modelPath = $modelsPath . DIRECTORY_SEPARATOR . 'User.php';
+    try {
+        file_put_contents($modelPath, "<?php\nclass User {}\n");
+        (new \Franciscovillaquiran\LaravelRelationGenerator\Generators\FillableGenerator())
+            ->generateFromTable($modelPath, $users, 'User');
+        $modelSource = file_get_contents($modelPath);
+        assertSameValue(false, str_contains($modelSource, 'remember_token'));
+        assertSameValue(true, str_contains($modelSource, "'password'"));
+    } finally {
+        if (is_file($modelPath)) {
+            unlink($modelPath);
+        }
+        rmdir($modelsPath);
+    }
+});
+
 $test('reads unique and compound primary constraints and detects cardinalities', static function () use ($root): void {
     $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/migrations');
     $users = $schema->table('users');

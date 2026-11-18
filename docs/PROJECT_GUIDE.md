@@ -240,6 +240,8 @@ Al final elimina duplicados. `getColumns()` no analiza el AST, las variables,
 condiciones o helpers de la migración. Las llamadas sin un nombre explícito de
 columna y variantes de formato que no coincidan con los textos buscados pueden
 no detectarse. El comando nuevo ya no usa `getColumns()` para generar `$fillable`.
+El analizador estructural sí reconoce `$table->rememberToken()` como una
+columna nullable `string(100)`, y la excluye de `$fillable`.
 
 ### Escritura de `$fillable`
 
@@ -493,8 +495,8 @@ individuales.
 - Longitudes, precisión/escala, nulabilidad, valores predeterminados literales,
   `useCurrent()`, unsigned, autoincremento, índices únicos/primarios/estándar
   y valores de enum.
-- `timestamps()`, `timestampsTz()`, `nullableTimestamps()`, `softDeletes()` y
-  `softDeletesTz()`.
+- `timestamps()`, `timestampsTz()`, `nullableTimestamps()`, `softDeletes()`,
+  `softDeletesTz()` y `rememberToken()` (columna nullable `string(100)`).
 - Claves foráneas con `foreignId()->constrained('tabla', 'columna', 'nombre')`
   o `foreign(...)->references(...)->on(...)`; se admiten columnas
   referenciadas compuestas y políticas `onDelete`, `onUpdate`,
