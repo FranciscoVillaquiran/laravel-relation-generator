@@ -67,12 +67,43 @@ $test('analyzes the default Laravel users migration including rememberToken', st
     assertSameValue(true, $rememberToken->nullable);
     assertSameValue(true, $users->columns['email_verified_at']->nullable);
     assertSameValue(
-        ['users', 'password_reset_tokens', 'sessions', 'cache', 'cache_locks', 'jobs', 'job_batches', 'failed_jobs'],
+        [
+            'users',
+            'personal_access_tokens',
+            'password_reset_tokens',
+            'sessions',
+            'cache',
+            'cache_locks',
+            'jobs',
+            'job_batches',
+            'failed_jobs',
+            'morph_variant_examples',
+        ],
         array_keys($schema->tables)
     );
     assertSameValue(true, $schema->table('sessions')->columns['user_id']->nullable);
     assertSameValue(true, $schema->table('jobs')->columns['attempts']->unsigned);
     assertSameValue('CURRENT_TIMESTAMP', $schema->table('failed_jobs')->columns['failed_at']->default);
+
+    $tokens = $schema->table('personal_access_tokens');
+    assertSameValue('string', $tokens->columns['tokenable_type']->type);
+    assertSameValue(255, $tokens->columns['tokenable_type']->length);
+    assertSameValue('bigInteger', $tokens->columns['tokenable_id']->type);
+    assertSameValue(true, $tokens->columns['tokenable_id']->unsigned);
+    assertSameValue(
+        ['tokenable_type', 'tokenable_id'],
+        $tokens->indexes['personal_access_tokens_tokenable_type_tokenable_id_index']->columns
+    );
+
+    $morphVariants = $schema->table('morph_variant_examples');
+    assertSameValue(true, $morphVariants->columns['nullable_numericable_type']->nullable);
+    assertSameValue('uuid', $morphVariants->columns['uuidable_id']->type);
+    assertSameValue('ulid', $morphVariants->columns['ulidable_id']->type);
+    assertSameValue(true, $morphVariants->columns['nullable_ulidable_id']->nullable);
+    assertSameValue(
+        ['default_nullable_type', 'default_nullable_id'],
+        $morphVariants->indexes['custom_default_nullable_index']->columns
+    );
 
     $modelsPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-default-users-' . bin2hex(random_bytes(6));
     if (!mkdir($modelsPath)) {

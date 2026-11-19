@@ -352,6 +352,23 @@ class MigrationParser
             ], $structure);
         }
 
+        if (in_array($method, [
+            'morphs',
+            'nullableMorphs',
+            'numericMorphs',
+            'nullableNumericMorphs',
+            'uuidMorphs',
+            'nullableUuidMorphs',
+            'ulidMorphs',
+            'nullableUlidMorphs',
+        ], true)) {
+            if (count($calls) !== 1) {
+                $this->fail($line, $description, 'the schema effect of chained polymorphic column helpers');
+            }
+
+            return $this->morphsStatement($first, $structure);
+        }
+
         if (isset(self::COLUMN_TYPES[$method])) {
             return $this->columnStatement($calls, $structure);
         }
@@ -428,6 +445,74 @@ class MigrationParser
         }
 
         $this->fail($line, $description, 'the schema effect of this Blueprint method');
+    }
+
+    private function morphsStatement(array $call, string $structure): array
+    {
+        $method = $call['method'];
+        $line = $call['line'];
+        $description = $structure . ' -> ' . $method;
+        $arguments = $call['arguments'];
+        $this->assertArgumentCount($arguments, 1, 3, $line, $description);
+
+        $name = $arguments[0] ?? null;
+        if (!is_string($name) || $name === '') {
+            $this->fail($line, $description, 'the polymorphic relationship name');
+        }
+        $indexName = $arguments[1] ?? null;
+        if ($indexName !== null && (!is_string($indexName) || $indexName === '')) {
+            $this->fail($line, $description, 'a literal polymorphic index name');
+        }
+        $after = $arguments[2] ?? null;
+        if ($after !== null && (!is_string($after) || $after === '')) {
+            $this->fail($line, $description, 'a literal column name for the after position');
+        }
+
+        $nullable = str_starts_with($method, 'nullable');
+        $idMethod = match ($method) {
+            'uuidMorphs', 'nullableUuidMorphs' => 'uuid',
+            'ulidMorphs', 'nullableUlidMorphs' => 'ulid',
+            default => 'unsignedBigInteger',
+        };
+        $typeColumn = "{$name}_type";
+        $idColumn = "{$name}_id";
+        $statements = [];
+
+        foreach ([
+            ['method' => 'string', 'name' => $typeColumn],
+            ['method' => $idMethod, 'name' => $idColumn],
+        ] as $columnDefinition) {
+            $columnCalls = [[
+                'method' => $columnDefinition['method'],
+                'arguments' => [$columnDefinition['name']],
+                'line' => $line,
+            ]];
+            if ($nullable) {
+                $columnCalls[] = [
+                    'method' => 'nullable',
+                    'arguments' => [],
+                    'line' => $line,
+                ];
+            }
+
+            $statement = $this->columnStatement($columnCalls, $structure);
+            $statement['description'] = $description;
+            $statements[] = $statement;
+        }
+
+        $statements[] = [
+            'operation' => 'index',
+            'index' => $this->indexData('index', [$typeColumn, $idColumn], $indexName, $line, $description),
+            'line' => $line,
+            'description' => $description,
+        ];
+
+        return [
+            'operation' => 'multiple',
+            'statements' => $statements,
+            'line' => $line,
+            'description' => $description,
+        ];
     }
 
     private function columnStatement(array $calls, string $structure): array

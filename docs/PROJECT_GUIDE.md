@@ -502,6 +502,11 @@ duplicados para una misma asociación.
   y valores de enum.
 - `timestamps()`, `timestampsTz()`, `nullableTimestamps()`, `softDeletes()`,
   `softDeletesTz()` y `rememberToken()` (columna nullable `string(100)`).
+- `morphs()`, `nullableMorphs()`, `numericMorphs()`, `uuidMorphs()`,
+  `ulidMorphs()` y variantes nullable, con sus columnas de tipo/ID e índice
+  compuesto. `morphs()` usa el tipo numérico predeterminado de Laravel; si la
+  aplicación cambia globalmente ese valor, utiliza el helper explícito
+  `uuidMorphs()` o `ulidMorphs()` para que el tipo sea determinable.
 - Claves foráneas con `foreignId()->constrained('tabla', 'columna', 'nombre')`
   o `foreign(...)->references(...)->on(...)`; se admiten columnas
   referenciadas compuestas y políticas `onDelete`, `onUpdate`,

@@ -17,6 +17,17 @@ return new class extends Migration {
             $table->timestamps();
         });
 
+        Schema::create('personal_access_tokens', function (Blueprint $table): void {
+            $table->id();
+            $table->morphs('tokenable');
+            $table->text('name');
+            $table->string('token', 64)->unique();
+            $table->text('abilities')->nullable();
+            $table->timestamp('last_used_at')->nullable();
+            $table->timestamp('expires_at')->nullable()->index();
+            $table->timestamps();
+        });
+
         Schema::create('password_reset_tokens', function (Blueprint $table): void {
             $table->string('email')->primary();
             $table->string('token');
@@ -75,6 +86,16 @@ return new class extends Migration {
             $table->longText('payload');
             $table->longText('exception');
             $table->timestamp('failed_at')->useCurrent();
+        });
+
+        Schema::create('morph_variant_examples', function (Blueprint $table): void {
+            $table->numericMorphs('numericable');
+            $table->nullableNumericMorphs('nullable_numericable');
+            $table->uuidMorphs('uuidable');
+            $table->nullableUuidMorphs('nullable_uuidable');
+            $table->ulidMorphs('ulidable');
+            $table->nullableUlidMorphs('nullable_ulidable');
+            $table->nullableMorphs('default_nullable', 'custom_default_nullable_index');
         });
     }
 
