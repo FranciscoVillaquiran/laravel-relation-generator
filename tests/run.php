@@ -127,6 +127,51 @@ $test('reads unique and compound primary constraints and detects cardinalities',
     assertSameValue('N:M', $cardinalities['posts:tags']);
 });
 
+$test('recognizes conventional Laravel pivots with surrogate IDs and no unique pair index', static function () use ($root): void {
+    $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/laravel_conventional_pivot_with_id.php');
+    $manyToMany = array_values(array_filter(
+        $schema->relations,
+        static fn ($relation): bool => $relation->cardinality === 'N:M'
+    ));
+
+    assertSameValue(1, count($manyToMany));
+    assertSameValue('course_student', $manyToMany[0]->pivotTable);
+    assertSameValue(false, $schema->table('course_student')->hasUniqueColumns(['course_id', 'student_id']));
+
+    $modelsPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-course-student-' . bin2hex(random_bytes(6));
+    if (!mkdir($modelsPath)) {
+        throw new RuntimeException("Could not create temporary models directory: {$modelsPath}");
+    }
+
+    $coursePath = $modelsPath . DIRECTORY_SEPARATOR . 'Course.php';
+    $studentPath = $modelsPath . DIRECTORY_SEPARATOR . 'Student.php';
+    try {
+        file_put_contents($coursePath, "<?php\nnamespace App\\Models;\nclass Course {}\n");
+        file_put_contents($studentPath, "<?php\nnamespace App\\Models;\nclass Student {}\n");
+        (new RelationshipGenerator())->generateFromSchema(
+            new RelationDefinition('Course', 'Student', 'N:M', modelATable: 'courses', modelBTable: 'students'),
+            $schema,
+            $modelsPath
+        );
+
+        assertSameValue(true, str_contains(
+            file_get_contents($coursePath),
+            "belongsToMany(\\App\\Models\\Student::class, 'course_student', 'course_id', 'student_id', 'id', 'id')"
+        ));
+        assertSameValue(true, str_contains(
+            file_get_contents($studentPath),
+            "belongsToMany(\\App\\Models\\Course::class, 'course_student', 'student_id', 'course_id', 'id', 'id')"
+        ));
+    } finally {
+        foreach ([$coursePath, $studentPath] as $path) {
+            if (is_file($path)) {
+                unlink($path);
+            }
+        }
+        rmdir($modelsPath);
+    }
+});
+
 $test('reads foreign keys, referential policies and explicit index names', static function () use ($root): void {
     $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/migrations');
     $foreignKey = $schema->table('profiles')->foreignKeys['profiles_user_foreign'];

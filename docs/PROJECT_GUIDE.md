@@ -472,8 +472,10 @@ Las relaciones estructurales usan:
   primaria o única exacta.
 - `1:N` para una clave foránea no única, orientada desde la tabla referida
   (lado uno) hasta la tabla que contiene la clave (lado muchos).
-- `N:M` si una tabla tiene exactamente dos claves foráneas a tablas distintas
-  y una clave primaria/única sobre la combinación de columnas foráneas.
+- `N:M` si una tabla tiene exactamente dos claves foráneas a tablas distintas,
+  ninguna clave foránea individual es única y se cumple al menos una condición:
+  una restricción primaria/única sobre el par de columnas o el nombre pivote
+  convencional de Laravel (nombres de tabla singulares, en orden alfabético).
 
 Una relación contiene `cardinality`, `sourceTable`, `sourceColumns`,
 `targetTable`, `targetColumns`, `foreignKey`, `pivotTable`, `foreignKeyTable`,
@@ -483,6 +485,9 @@ Una relación contiene `cardinality`, `sourceTable`, `sourceColumns`,
 `referencedColumns` conservan la dirección real de la clave. Las claves
 foráneas de la tabla pivote también se conservan como restricciones
 individuales.
+Una pivote convencional con PK sustituta (`id`) y sin unicidad del par puede
+generar `belongsToMany()`; en ese caso la base de datos no impide insertar
+duplicados para una misma asociación.
 
 ### Patrones admitidos
 

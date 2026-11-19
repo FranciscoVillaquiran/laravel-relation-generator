@@ -4,6 +4,35 @@ namespace Illuminate\Support;
 
 class Str
 {
+    public static function singular(string $value): string
+    {
+        $irregular = [
+            'children' => 'child',
+            'people' => 'person',
+            'mice' => 'mouse',
+            'courses' => 'course',
+        ];
+        if (isset($irregular[strtolower($value)])) {
+            return $irregular[strtolower($value)];
+        }
+        foreach (['children' => 'child', 'people' => 'person', 'mice' => 'mouse'] as $plural => $singular) {
+            if (str_ends_with(strtolower($value), $plural)) {
+                return substr($value, 0, -strlen($plural)) . $singular;
+            }
+        }
+        if (preg_match('/ies$/i', $value) === 1) {
+            return substr($value, 0, -3) . 'y';
+        }
+        if (preg_match('/(s|x|z|ch|sh)es$/i', $value) === 1) {
+            return substr($value, 0, -2);
+        }
+        if (preg_match('/s$/i', $value) === 1) {
+            return substr($value, 0, -1);
+        }
+
+        return $value;
+    }
+
     public static function camel(string $value): string
     {
         return lcfirst(str_replace(' ', '', ucwords(str_replace(['-', '_'], ' ', $value))));

@@ -2,6 +2,8 @@
 
 namespace Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema;
 
+use Illuminate\Support\Str;
+
 class SchemaBuilder
 {
     /**
@@ -400,10 +402,13 @@ class SchemaBuilder
                 $foreignKeys[0]->referencedTable === $foreignKeys[1]->referencedTable
                 || $table->hasUniqueSubset($foreignKeys[0]->columns)
                 || $table->hasUniqueSubset($foreignKeys[1]->columns)
-                || !$table->hasUniqueColumns(array_merge(
-                    $foreignKeys[0]->columns,
-                    $foreignKeys[1]->columns
-                ))
+                || (
+                    !$table->hasUniqueColumns(array_merge(
+                        $foreignKeys[0]->columns,
+                        $foreignKeys[1]->columns
+                    ))
+                    && !$this->hasConventionalPivotName($table, $foreignKeys)
+                )
             ) {
                 continue;
             }
@@ -446,6 +451,20 @@ class SchemaBuilder
         }
 
         return $relations;
+    }
+
+    /**
+     * @param list<SchemaForeignKey> $foreignKeys
+     */
+    private function hasConventionalPivotName(SchemaTable $table, array $foreignKeys): bool
+    {
+        $tables = [
+            Str::snake(Str::singular($foreignKeys[0]->referencedTable)),
+            Str::snake(Str::singular($foreignKeys[1]->referencedTable)),
+        ];
+        sort($tables, SORT_STRING);
+
+        return $table->name === implode('_', $tables);
     }
 
     private function renameTable(
