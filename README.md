@@ -50,6 +50,7 @@ LRG restores the previous project files. The structural index
 `.lrg/lrg-index.json` is updated only after generation succeeds.
 
 The package follows semantic versioning through Git tags (`vMAJOR.MINOR.PATCH`).
+The direct, validation-free CRUD controller behavior is introduced in `v3.0.0`.
 
 ## Structural migration analysis
 
