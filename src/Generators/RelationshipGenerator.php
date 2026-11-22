@@ -291,7 +291,13 @@ class RelationshipGenerator
                         )
                 )
             )));
-            $detail = $available === [] ? 'no matching foreign-key structure' : 'available cardinality: ' . implode(', ', $available);
+            $detail = $available === []
+                ? 'no matching foreign-key structure'
+                : 'available cardinality: ' . implode(', ', $available);
+            if ($definition->cardinality === 'N:M' && !in_array('N:M', $available, true)) {
+                $detail = 'no recognized pivot table; expected exactly two foreign keys to the requested '
+                    . 'tables and either a unique constraint on the key pair or Laravel\'s conventional pivot name';
+            }
             throw new \RuntimeException(
                 "Could not resolve a {$definition->cardinality} relationship between {$tableA} and {$tableB}; {$detail}."
             );

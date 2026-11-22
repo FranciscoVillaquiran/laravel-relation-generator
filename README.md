@@ -40,6 +40,9 @@ php artisan relation:make Category Product 1:N --crud --api
 `--crud` generates controllers without registering API routes.
 `--api` requires `--crud`. Models and migration files must already exist;
 LRG does not create models or migrations, or run migrations.
+Generated controllers expose `index`, `store`, `show`, `update`, and `destroy`
+using direct Eloquent calls. They do not add request validation or custom
+database-error handling; Eloquent and the database retain their normal behavior.
 
 Generation is prepared in temporary copies, then applied with recoverable
 backups. If validation, a write, schema verification, or index update fails,
@@ -47,6 +50,7 @@ LRG restores the previous project files. The structural index
 `.lrg/lrg-index.json` is updated only after generation succeeds.
 
 The package follows semantic versioning through Git tags (`vMAJOR.MINOR.PATCH`).
+The direct, validation-free CRUD controller behavior is introduced in `v3.0.0`.
 
 ## Structural migration analysis
 
@@ -95,7 +99,7 @@ that cannot be verified are rejected.
 
 The API route generator is also available independently when CRUD controllers
 already exist. The command's CRUD generator refuses to overwrite a manual
-controller and does not create CRUD for pivot tables.
+controller.
 
 ## Project documentation
 

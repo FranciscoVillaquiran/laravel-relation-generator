@@ -370,18 +370,6 @@ PHP);
             "Category creation returned HTTP {$status}, expected 201: " . var_export($categoryResponse, true)
         );
     }
-    [$duplicateStatus] = $request($kernel, 'POST', '/api/categories', ['name' => 'Hardware']);
-    if ($duplicateStatus !== 422) {
-        throw new RuntimeException("Unique category validation returned HTTP {$duplicateStatus}, expected 422.");
-    }
-    [$missingStatus] = $request($kernel, 'POST', '/api/products', ['category_id' => 99999]);
-    if ($missingStatus !== 422) {
-        throw new RuntimeException("Required product validation returned HTTP {$missingStatus}, expected 422.");
-    }
-    [$foreignStatus] = $request($kernel, 'POST', '/api/products', ['category_id' => 99999, 'name' => 'Invalid']);
-    if ($foreignStatus !== 422) {
-        throw new RuntimeException("Foreign-key validation returned HTTP {$foreignStatus}, expected 422.");
-    }
     [$categoryListStatus, $categoryList] = $request($kernel, 'GET', '/api/categories');
     if ($categoryListStatus !== 200 || count($categoryList) !== 1) {
         throw new RuntimeException('Collection endpoint returned an unexpected response.');
@@ -413,12 +401,6 @@ PHP);
     if ($missingRecordStatus !== 404) {
         throw new RuntimeException("Missing product returned HTTP {$missingRecordStatus}, expected 404.");
     }
-    [$restrictedDeleteStatus] = $request($kernel, 'DELETE', '/api/categories/' . $categoryId);
-    if ($restrictedDeleteStatus !== 409) {
-        throw new RuntimeException(
-            "Restricted category delete returned HTTP {$restrictedDeleteStatus}, expected 409."
-        );
-    }
     [$productDeleteStatus] = $request($kernel, 'DELETE', '/api/products/' . $product['id']);
     if ($productDeleteStatus !== 204) {
         throw new RuntimeException("Product delete returned HTTP {$productDeleteStatus}, expected 204.");
@@ -441,15 +423,6 @@ PHP);
     if ($profileStatus !== 201) {
         throw new RuntimeException("Profile creation returned HTTP {$profileStatus}, expected 201.");
     }
-    [$duplicateProfileStatus] = $request(
-        $kernel,
-        'POST',
-        '/api/profiles',
-        ['user_id' => $userResponse['id'], 'biography' => 'Duplicate']
-    );
-    if ($duplicateProfileStatus !== 422) {
-        throw new RuntimeException("Unique one-to-one foreign key returned HTTP {$duplicateProfileStatus}, expected 422.");
-    }
     [$profileUpdateStatus] = $request(
         $kernel,
         'PATCH',
@@ -458,10 +431,6 @@ PHP);
     );
     if ($profileUpdateStatus !== 200) {
         throw new RuntimeException("Profile partial update returned HTTP {$profileUpdateStatus}, expected 200.");
-    }
-    [$restrictedUserDeleteStatus] = $request($kernel, 'DELETE', '/api/users/' . $userResponse['id']);
-    if ($restrictedUserDeleteStatus !== 409) {
-        throw new RuntimeException("Restricted user delete returned HTTP {$restrictedUserDeleteStatus}, expected 409.");
     }
     [$profileDeleteStatus] = $request($kernel, 'DELETE', '/api/profiles/' . $profileResponse['id']);
     if ($profileDeleteStatus !== 204) {

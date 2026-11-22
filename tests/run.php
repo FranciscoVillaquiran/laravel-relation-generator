@@ -67,12 +67,43 @@ $test('analyzes the default Laravel users migration including rememberToken', st
     assertSameValue(true, $rememberToken->nullable);
     assertSameValue(true, $users->columns['email_verified_at']->nullable);
     assertSameValue(
-        ['users', 'password_reset_tokens', 'sessions', 'cache', 'cache_locks', 'jobs', 'job_batches', 'failed_jobs'],
+        [
+            'users',
+            'personal_access_tokens',
+            'password_reset_tokens',
+            'sessions',
+            'cache',
+            'cache_locks',
+            'jobs',
+            'job_batches',
+            'failed_jobs',
+            'morph_variant_examples',
+        ],
         array_keys($schema->tables)
     );
     assertSameValue(true, $schema->table('sessions')->columns['user_id']->nullable);
     assertSameValue(true, $schema->table('jobs')->columns['attempts']->unsigned);
     assertSameValue('CURRENT_TIMESTAMP', $schema->table('failed_jobs')->columns['failed_at']->default);
+
+    $tokens = $schema->table('personal_access_tokens');
+    assertSameValue('string', $tokens->columns['tokenable_type']->type);
+    assertSameValue(255, $tokens->columns['tokenable_type']->length);
+    assertSameValue('bigInteger', $tokens->columns['tokenable_id']->type);
+    assertSameValue(true, $tokens->columns['tokenable_id']->unsigned);
+    assertSameValue(
+        ['tokenable_type', 'tokenable_id'],
+        $tokens->indexes['personal_access_tokens_tokenable_type_tokenable_id_index']->columns
+    );
+
+    $morphVariants = $schema->table('morph_variant_examples');
+    assertSameValue(true, $morphVariants->columns['nullable_numericable_type']->nullable);
+    assertSameValue('uuid', $morphVariants->columns['uuidable_id']->type);
+    assertSameValue('ulid', $morphVariants->columns['ulidable_id']->type);
+    assertSameValue(true, $morphVariants->columns['nullable_ulidable_id']->nullable);
+    assertSameValue(
+        ['default_nullable_type', 'default_nullable_id'],
+        $morphVariants->indexes['custom_default_nullable_index']->columns
+    );
 
     $modelsPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-default-users-' . bin2hex(random_bytes(6));
     if (!mkdir($modelsPath)) {
@@ -125,6 +156,51 @@ $test('reads unique and compound primary constraints and detects cardinalities',
     assertSameValue('1:N', $cardinalities['users:posts']);
     assertSameValue('1:N', $cardinalities['regions:localities']);
     assertSameValue('N:M', $cardinalities['posts:tags']);
+});
+
+$test('recognizes conventional Laravel pivots with surrogate IDs and no unique pair index', static function () use ($root): void {
+    $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/laravel_conventional_pivot_with_id.php');
+    $manyToMany = array_values(array_filter(
+        $schema->relations,
+        static fn ($relation): bool => $relation->cardinality === 'N:M'
+    ));
+
+    assertSameValue(1, count($manyToMany));
+    assertSameValue('course_student', $manyToMany[0]->pivotTable);
+    assertSameValue(false, $schema->table('course_student')->hasUniqueColumns(['course_id', 'student_id']));
+
+    $modelsPath = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-course-student-' . bin2hex(random_bytes(6));
+    if (!mkdir($modelsPath)) {
+        throw new RuntimeException("Could not create temporary models directory: {$modelsPath}");
+    }
+
+    $coursePath = $modelsPath . DIRECTORY_SEPARATOR . 'Course.php';
+    $studentPath = $modelsPath . DIRECTORY_SEPARATOR . 'Student.php';
+    try {
+        file_put_contents($coursePath, "<?php\nnamespace App\\Models;\nclass Course {}\n");
+        file_put_contents($studentPath, "<?php\nnamespace App\\Models;\nclass Student {}\n");
+        (new RelationshipGenerator())->generateFromSchema(
+            new RelationDefinition('Course', 'Student', 'N:M', modelATable: 'courses', modelBTable: 'students'),
+            $schema,
+            $modelsPath
+        );
+
+        assertSameValue(true, str_contains(
+            file_get_contents($coursePath),
+            "belongsToMany(\\App\\Models\\Student::class, 'course_student', 'course_id', 'student_id', 'id', 'id')"
+        ));
+        assertSameValue(true, str_contains(
+            file_get_contents($studentPath),
+            "belongsToMany(\\App\\Models\\Course::class, 'course_student', 'student_id', 'course_id', 'id', 'id')"
+        ));
+    } finally {
+        foreach ([$coursePath, $studentPath] as $path) {
+            if (is_file($path)) {
+                unlink($path);
+            }
+        }
+        rmdir($modelsPath);
+    }
 });
 
 $test('reads foreign keys, referential policies and explicit index names', static function () use ($root): void {
@@ -576,7 +652,7 @@ $test('generates fillable safely from schema and protects manual configuration',
     }
 });
 
-$test('generates validated idempotent CRUD controllers and protects manual controllers', static function () use ($root): void {
+$test('generates simple idempotent CRUD controllers and protects manual controllers', static function () use ($root): void {
     $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/migrations');
     $projectRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-crud-' . bin2hex(random_bytes(6));
     if (!mkdir($projectRoot)) {
@@ -598,8 +674,13 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
         assertSameValue(true, str_contains($source, 'public function show(string $id)'));
         assertSameValue(true, str_contains($source, 'public function update(Request $request, string $id)'));
         assertSameValue(true, str_contains($source, 'public function destroy(string $id)'));
-        assertSameValue(true, str_contains($source, "Rule::exists('users', 'id')"));
-        assertSameValue(true, str_contains($source, "\$rules['title'] ="));
+        assertSameValue(true, str_contains($source, 'Post::create($request->all())'));
+        assertSameValue(true, str_contains($source, 'Post::findOrFail($id)'));
+        assertSameValue(true, str_contains($source, '$record->update($request->all())'));
+        assertSameValue(true, str_contains($source, '$record->delete()'));
+        assertSameValue(false, str_contains($source, 'validate('));
+        assertSameValue(false, str_contains($source, 'QueryException'));
+        assertSameValue(false, str_contains($source, 'Rule::'));
         assertSameValue(false, $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema));
         assertSameValue($source, file_get_contents($controllerPath));
 
@@ -609,8 +690,7 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
         $generator->generateFromTable($projectRoot, 'App\\Models\\User', $schema->table('users'), $schema);
         $usersSource = file_get_contents($usersController);
         token_get_all($usersSource, TOKEN_PARSE);
-        assertSameValue(true, str_contains($usersSource, "Rule::unique('users', 'display_name')"));
-        assertSameValue(true, str_contains($usersSource, "'regex:/^-?[0-9]{1,8}(?:\\\\.[0-9]{1,2})?$/'"));
+        assertSameValue(false, str_contains($usersSource, 'rules('));
 
         $manualSource = $source . "// manual edit\n";
         file_put_contents($controllerPath, $manualSource);
@@ -622,17 +702,19 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
             assertSameValue($manualSource, file_get_contents($controllerPath));
         }
 
-        try {
+        $pivotController = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
+            . DIRECTORY_SEPARATOR . 'PostTagController.php';
+        assertSameValue(
+            true,
             $generator->generateFromTable(
                 $projectRoot,
                 'App\\Models\\PostTag',
                 $schema->table('post_tag'),
                 $schema
-            );
-            throw new RuntimeException('Expected pivot-table CRUD generation to be rejected.');
-        } catch (RuntimeException $exception) {
-            assertSameValue(true, str_contains($exception->getMessage(), 'pivot table'));
-        }
+            )
+        );
+        assertSameValue(true, is_file($pivotController));
 
         $binaryTable = new SchemaTable('binary_records', [
             'id' => new SchemaColumn('id', 'bigInteger', autoIncrement: true),
@@ -640,17 +722,19 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
         ], [
             'binary_records_primary' => new SchemaIndex('binary_records_primary', 'primary', ['id'], true),
         ]);
-        try {
+        $binaryController = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
+            . DIRECTORY_SEPARATOR . 'BinaryRecordController.php';
+        assertSameValue(
+            true,
             $generator->generateFromTable(
                 $projectRoot,
                 'App\\Models\\BinaryRecord',
                 $binaryTable,
                 new \Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\DatabaseSchema()
-            );
-            throw new RuntimeException('Expected unsupported binary validation to be rejected.');
-        } catch (RuntimeException $exception) {
-            assertSameValue(true, str_contains($exception->getMessage(), 'binary column'));
-        }
+            )
+        );
+        assertSameValue(true, is_file($binaryController));
     } finally {
         foreach (new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($projectRoot, FilesystemIterator::SKIP_DOTS),
