@@ -652,7 +652,7 @@ $test('generates fillable safely from schema and protects manual configuration',
     }
 });
 
-$test('generates validated idempotent CRUD controllers and protects manual controllers', static function () use ($root): void {
+$test('generates simple idempotent CRUD controllers and protects manual controllers', static function () use ($root): void {
     $schema = (new MigrationReader())->analyze($root . '/tests/fixtures/migrations');
     $projectRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-crud-' . bin2hex(random_bytes(6));
     if (!mkdir($projectRoot)) {
@@ -674,8 +674,13 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
         assertSameValue(true, str_contains($source, 'public function show(string $id)'));
         assertSameValue(true, str_contains($source, 'public function update(Request $request, string $id)'));
         assertSameValue(true, str_contains($source, 'public function destroy(string $id)'));
-        assertSameValue(true, str_contains($source, "Rule::exists('users', 'id')"));
-        assertSameValue(true, str_contains($source, "\$rules['title'] ="));
+        assertSameValue(true, str_contains($source, 'Post::create($request->all())'));
+        assertSameValue(true, str_contains($source, 'Post::findOrFail($id)'));
+        assertSameValue(true, str_contains($source, '$record->update($request->all())'));
+        assertSameValue(true, str_contains($source, '$record->delete()'));
+        assertSameValue(false, str_contains($source, 'validate('));
+        assertSameValue(false, str_contains($source, 'QueryException'));
+        assertSameValue(false, str_contains($source, 'Rule::'));
         assertSameValue(false, $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema));
         assertSameValue($source, file_get_contents($controllerPath));
 
@@ -685,8 +690,7 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
         $generator->generateFromTable($projectRoot, 'App\\Models\\User', $schema->table('users'), $schema);
         $usersSource = file_get_contents($usersController);
         token_get_all($usersSource, TOKEN_PARSE);
-        assertSameValue(true, str_contains($usersSource, "Rule::unique('users', 'display_name')"));
-        assertSameValue(true, str_contains($usersSource, "'regex:/^-?[0-9]{1,8}(?:\\\\.[0-9]{1,2})?$/'"));
+        assertSameValue(false, str_contains($usersSource, 'rules('));
 
         $manualSource = $source . "// manual edit\n";
         file_put_contents($controllerPath, $manualSource);
@@ -698,17 +702,19 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
             assertSameValue($manualSource, file_get_contents($controllerPath));
         }
 
-        try {
+        $pivotController = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
+            . DIRECTORY_SEPARATOR . 'PostTagController.php';
+        assertSameValue(
+            true,
             $generator->generateFromTable(
                 $projectRoot,
                 'App\\Models\\PostTag',
                 $schema->table('post_tag'),
                 $schema
-            );
-            throw new RuntimeException('Expected pivot-table CRUD generation to be rejected.');
-        } catch (RuntimeException $exception) {
-            assertSameValue(true, str_contains($exception->getMessage(), 'pivot table'));
-        }
+            )
+        );
+        assertSameValue(true, is_file($pivotController));
 
         $binaryTable = new SchemaTable('binary_records', [
             'id' => new SchemaColumn('id', 'bigInteger', autoIncrement: true),
@@ -716,17 +722,19 @@ $test('generates validated idempotent CRUD controllers and protects manual contr
         ], [
             'binary_records_primary' => new SchemaIndex('binary_records_primary', 'primary', ['id'], true),
         ]);
-        try {
+        $binaryController = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
+            . DIRECTORY_SEPARATOR . 'BinaryRecordController.php';
+        assertSameValue(
+            true,
             $generator->generateFromTable(
                 $projectRoot,
                 'App\\Models\\BinaryRecord',
                 $binaryTable,
                 new \Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\DatabaseSchema()
-            );
-            throw new RuntimeException('Expected unsupported binary validation to be rejected.');
-        } catch (RuntimeException $exception) {
-            assertSameValue(true, str_contains($exception->getMessage(), 'binary column'));
-        }
+            )
+        );
+        assertSameValue(true, is_file($binaryController));
     } finally {
         foreach (new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($projectRoot, FilesystemIterator::SKIP_DOTS),

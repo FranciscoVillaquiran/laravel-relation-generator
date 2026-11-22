@@ -1,8 +1,8 @@
 # Diseño y funcionamiento de Laravel Relation Generator
 
-Este documento describe el estado implementado de LRG 2.0 y sus diferencias
-frente al baseline `v1.1.0`. Separa las capacidades disponibles de las
-limitaciones que requieren decisiones o configuración de la aplicación.
+Este documento describe la arquitectura actual de LRG `v3.0.0`, incluyendo
+las capacidades heredadas y las limitaciones que requieren decisiones o
+configuración de la aplicación.
 
 ## 1. Qué es el proyecto
 
@@ -62,7 +62,7 @@ src/
 | `Generators/FillableGenerator.php` | Construye y escribe `$fillable` en un modelo. |
 | `Generators/QueryGenerator.php` | Crea o actualiza `ConsultasController` con métodos que cargan relaciones. |
 | `Generators/RouteGenerator.php` | Añade rutas GET que apuntan a los métodos del controlador. |
-| `Generators/CrudGenerator.php` | Genera controladores CRUD y reglas de validación a partir de `SchemaTable`. |
+| `Generators/CrudGenerator.php` | Genera controladores CRUD sencillos que delegan las operaciones a Eloquent. |
 | `Generators/ApiRouteGenerator.php` | Acumula recursos en `routes/lrg_api.php` y mantiene una inclusión en `routes/api.php`. |
 | `Generators/FileChangeTransaction.php` | Conserva backups, aplica escrituras preparadas y recupera archivos si la operación falla. |
 
@@ -376,32 +376,27 @@ implícitas de Laravel:
 2. **Convenciones de proyecto.** Se requieren modelos en `app/Models` y bajo
    `App\Models`; controladores API usan el namespace
    `App\Http\Controllers\Api`.
-3. **Límites de Eloquent.** No se generan relaciones con claves compuestas ni
-   CRUD para tablas pivote. CRUD requiere una PK simple autogenerada o con
-   valor predeterminado; claves primarias asignadas por lógica del modelo no
-   se infieren.
-4. **Relaciones CRUD.** Las FK compuestas no se traducen a reglas `exists`.
-   Los modelos de tablas con `deleted_at` deben declarar el trait
-   `SoftDeletes`; tablas con solo una de las columnas `created_at` /
-   `updated_at` se rechazan. No se generan transacciones de negocio ni
-   operaciones API de asociación N:M.
-5. **Validación.** Las reglas derivan de tipos, longitudes, nulabilidad,
-   defaults, unsigned, enum, claves únicas simples/compuestas y FK admitidas.
-   La precisión decimal se acota cuando el lector la conoce. Tipos binarios,
-   identificadores de campo no convencionales y restricciones que no puedan
-   traducirse de forma fiable causan rechazo; la base de datos conserva la
-   garantía final y sus conflictos de integridad se responden con HTTP 409.
-6. **Seguridad de asignación.** `$fillable` es estructural, no una política de
+3. **Límites de Eloquent.** Las relaciones Eloquent no admiten claves
+   compuestas de forma nativa. Los endpoints CRUD usan las claves y los
+   comportamientos configurados en cada modelo; el generador no deriva reglas
+   de validación a partir de claves, restricciones o tipos de columna.
+4. **CRUD directo.** Las operaciones envían los datos de la solicitud a
+   Eloquent y no agregan validación ni manejo de errores de negocio. Las
+   restricciones declaradas en la base de datos siguen aplicándose; Laravel y
+   la base de datos determinan la respuesta ante registros inexistentes o
+   errores de integridad. No se generan transacciones de negocio ni operaciones
+   API de asociación N:M.
+5. **Seguridad de asignación.** `$fillable` es estructural, no una política de
    autorización. Revisa campos sensibles antes de exponer CRUD. No se genera
    login, middleware, permisos ni reglas particulares.
-7. **Generadores heredados.** `QueryGenerator` y `RouteGenerator` mantienen
+6. **Generadores heredados.** `QueryGenerator` y `RouteGenerator` mantienen
    su comportamiento de consultas `get()` y rutas GET sin filtros,
    paginación o autorización. La modalidad `--crud` no los invoca.
-8. **Conflictos.** Un método, allowlist, controlador, ruta o configuración
+7. **Conflictos.** Un método, allowlist, controlador, ruta o configuración
    manual incompatible bloquea la operación completa. Los grupos de rutas
    dinámicos y configuraciones Laravel API no reconocibles se rechazan en vez
    de considerarse cargados.
-9. **Pruebas.** `php tests/run.php` cubre análisis y generadores;
+8. **Pruebas.** `php tests/run.php` cubre análisis y generadores;
    `php tests/full_generation_integration.php <autoload>` valida el comando,
    migraciones, rutas y HTTP en un Laravel disponible. Las versiones exactas
    comprobadas se indican al final de este documento.
@@ -668,30 +663,20 @@ genera:
 app/Http/Controllers/Api/{Model}Controller.php
 ```
 
-Cada controlador implementa `index`, `store`, `show`, `update` y `destroy`.
-Consulta y muta el modelo Eloquent, devuelve JSON y utiliza 201 para creación,
-200 para consulta/actualización, 404 para recursos inexistentes y 204 para
-eliminación. Las validaciones inválidas siguen el comportamiento Laravel 422.
-Los errores de integridad reconocidos de la base se convierten en 409; otras
-`QueryException` se relanzan.
+Cada controlador implementa `index`, `store`, `show`, `update` y `destroy`
+con operaciones directas de Eloquent (`all`, `create`, `findOrFail`, `update`
+y `delete`). Devuelve JSON, usa 201 para creación, 200 para consulta y
+actualización, y 204 para eliminación. No genera validaciones ni transforma
+excepciones de Eloquent o la base de datos en respuestas personalizadas.
+`findOrFail` conserva el comportamiento Laravel estándar cuando un registro no
+existe.
 
-Las reglas cubren los tipos admitidos por `CrudGenerator`, longitudes de
-texto, nulabilidad, campos requeridos, defaults, unsigned, precisión/escala
-decimal, enums, claves foráneas y restricciones `UNIQUE` simples o compuestas.
-Las reglas `unique` de actualización ignoran la PK obtenida del registro
-cargado; no aceptan un identificador de exclusión proporcionado por el cliente.
-Los campos de PK, timestamps y columnas administradas por Eloquent no se
-aceptan como entrada. Sin columnas `created_at`/`updated_at`, el controlador
-desactiva timestamps para la escritura; si solo existe una de las dos, rechaza
-la entidad. Una entidad con `deleted_at` requiere que el modelo ya use
-`SoftDeletes`.
-
-No genera CRUD para pivotes ni tablas sin una PK simple autogenerada o con
-default. No soporta claves foráneas compuestas, ni tipos o identificadores que
-no se puedan validar sin ambigüedad. No agrega políticas de acceso, filtros,
-paginación, autenticación, ni `attach()`, `detach()` o `sync()`. Si el
-controlador ya existe y no es idéntico al generado por LRG, lo conserva y
-rechaza la operación.
+La asignación usa los `$fillable` generados estructuralmente para los modelos;
+el generador no inspecciona tipos de columna, claves foráneas ni índices para
+crear reglas de entrada. Las restricciones del esquema se mantienen en la
+base de datos. No agrega filtros, paginación, autenticación, autorización, ni
+`attach()`, `detach()` o `sync()`. Si el controlador ya existe y no es idéntico
+al generado por LRG, lo conserva y rechaza la operación.
 
 Con `--api`, `ApiRouteGenerator` registra cada entidad solicitada mediante
 `Route::apiResource()`. Los recursos usan snake_case plural (`users`,
@@ -732,12 +717,12 @@ php tests/full_generation_integration.php <ruta-a-vendor/autoload.php>
 
 La integración crea una aplicación temporal con migraciones SQLite, ejecuta
 `relation:make` dos veces para las tres cardinalidades, comprueba los métodos
-Eloquent, `php artisan route:list`, respuestas HTTP, validación de FK/unique,
-actualizaciones parciales, errores de integridad, preservación de rutas web,
-el conflicto con un controlador manual, el rechazo de una migración ambigua y
-una falla controlada después de una escritura parcial; verifica que los
-archivos generados y el índice se recuperen. `tests/run.php` también inyecta
-un fallo de escritura para probar el rollback transaccional directamente.
+Eloquent, `php artisan route:list`, operaciones CRUD HTTP, actualizaciones
+parciales, preservación de rutas web, el conflicto con un controlador manual,
+el rechazo de una migración ambigua y una falla controlada después de una
+escritura parcial; verifica que los archivos generados y el índice se
+recuperen. `tests/run.php` también inyecta un fallo de escritura para probar
+el rollback transaccional directamente.
 
 Combinaciones ejecutadas en este entorno:
 
