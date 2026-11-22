@@ -84,7 +84,7 @@ class FileChangeTransaction
     }
 
     /**
-     * @param array<string, string> $changes Absolute path to generated contents.
+     * @param array<string, string|null> $changes Absolute path to generated contents, or null to delete.
      */
     public function apply(array $changes): void
     {
@@ -94,6 +94,18 @@ class FileChangeTransaction
         try {
             foreach ($changes as $path => $contents) {
                 $snapshot = $this->snapshots[$path];
+                if ($contents === null) {
+                    if (!$snapshot['exists']) {
+                        continue;
+                    }
+                    if ($this->beforeWrite !== null) {
+                        ($this->beforeWrite)($path);
+                    }
+                    if (!@unlink($path)) {
+                        throw new RuntimeException("Could not remove obsolete generated file: {$path}");
+                    }
+                    continue;
+                }
                 if ($snapshot['exists'] && file_get_contents($path) === $contents) {
                     continue;
                 }

@@ -128,12 +128,18 @@ try {
             JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR
         ) . "\n"
     );
+    $localModelClassMap = [];
+    foreach (['User', 'Profile', 'Category', 'Product', 'Post', 'Tag', 'Author', 'Book'] as $model) {
+        $localModelClassMap['App\\Models\\' . $model] = $projectRoot . DIRECTORY_SEPARATOR . 'app'
+            . DIRECTORY_SEPARATOR . 'Models' . DIRECTORY_SEPARATOR . $model . '.php';
+    }
     $write(
         'artisan',
         "<?php\n\$loader = require " . var_export($argv[1], true) . ";\n"
             . "\$loader->addPsr4('Franciscovillaquiran\\\\LaravelRelationGenerator\\\\', "
             . var_export($packageRoot . DIRECTORY_SEPARATOR . 'src', true) . ");\n"
-            . "\$loader->addPsr4('App\\\\', __DIR__ . '/app');\n"
+            . "\$loader->addClassMap(" . var_export($localModelClassMap, true) . ");\n"
+            . "\$loader->addPsr4('App\\\\', __DIR__ . '/app', true);\n"
             . "\$app = require __DIR__ . '/bootstrap/app.php';\n"
             . "exit(\$app->handleCommand(new \\Symfony\\Component\\Console\\Input\\ArgvInput()));\n"
     );
@@ -304,7 +310,8 @@ PHP, <<<'PHP'
 PHP);
 
     $run(['migrate', '--force']);
-    $loader->addPsr4('App\\', $projectRoot . DIRECTORY_SEPARATOR . 'app');
+    $loader->addClassMap($localModelClassMap);
+    $loader->addPsr4('App\\', $projectRoot . DIRECTORY_SEPARATOR . 'app', true);
     $run(['relation:make', 'User', 'Profile', '1:1', '--crud', '--api', '--no-interaction']);
     $run(['relation:make', 'Category', 'Product', '1:N', '--crud', '--api', '--no-interaction']);
     $run(['relation:make', 'Post', 'Tag', 'N:M', '--crud', '--api', '--no-interaction']);
@@ -323,7 +330,6 @@ PHP);
         'app/Http/Controllers/Api/PostController.php',
         'app/Http/Controllers/Api/TagController.php',
         'routes/api.php',
-        'routes/lrg_api.php',
         '.lrg/lrg-index.json',
     ];
     $hashes = [];
@@ -336,6 +342,13 @@ PHP);
     }
     if (is_file($projectRoot . DIRECTORY_SEPARATOR . 'app/Http/Controllers/Api/PostTagController.php')) {
         throw new RuntimeException('LRG generated CRUD for a pivot table.');
+    }
+    if (is_file($projectRoot . DIRECTORY_SEPARATOR . 'routes/lrg_api.php')) {
+        throw new RuntimeException('LRG generated API routes in a separate route file.');
+    }
+    $generatedApiRoutes = file_get_contents($projectRoot . DIRECTORY_SEPARATOR . 'routes/api.php');
+    if (str_contains($generatedApiRoutes, 'lrg_api.php')) {
+        throw new RuntimeException('Generated routes/api.php still includes a separate LRG routes file.');
     }
 
     foreach ([
@@ -356,7 +369,17 @@ PHP);
     }
 
     $routeList = $run(['route:list', '--path=api']);
-    foreach (['api/categories', 'api/categories/{category}', 'CategoryController@index', 'ProductController@store', 'PostController@destroy', 'TagController@update'] as $expected) {
+    foreach ([
+        'api/categories',
+        'api/categories/{category}',
+        'CategoryController@index',
+        'ProductController@store',
+        'PostController@destroy',
+        'TagController@update',
+        'api/posts/{post}/tags/{tag}',
+        'PostController@attachTag',
+        'TagController@attachPost',
+    ] as $expected) {
         if (!str_contains($routeList, $expected)) {
             throw new RuntimeException("route:list omitted {$expected}:\n{$routeList}");
         }
@@ -445,6 +468,29 @@ PHP);
     [$tagStatus, $tagResponse] = $request($kernel, 'POST', '/api/tags', ['name' => 'API tag']);
     if ($postStatus !== 201 || $tagStatus !== 201) {
         throw new RuntimeException('N:M participant CRUD creation did not return HTTP 201.');
+    }
+    [$associationStatus] = $request(
+        $kernel,
+        'POST',
+        '/api/posts/' . $postResponse['id'] . '/tags/' . $tagResponse['id']
+    );
+    if ($associationStatus !== 201) {
+        throw new RuntimeException("N:M association POST returned HTTP {$associationStatus}, expected 201.");
+    }
+    $postModel = App\Models\Post::findOrFail($postResponse['id']);
+    if (!$postModel->fresh()->tags->contains('id', $tagResponse['id'])) {
+        throw new RuntimeException('Generated N:M association POST did not attach the related model.');
+    }
+    [$disassociationStatus] = $request(
+        $kernel,
+        'DELETE',
+        '/api/posts/' . $postResponse['id'] . '/tags/' . $tagResponse['id']
+    );
+    if ($disassociationStatus !== 204) {
+        throw new RuntimeException("N:M association DELETE returned HTTP {$disassociationStatus}, expected 204.");
+    }
+    if ($postModel->fresh()->tags->contains('id', $tagResponse['id'])) {
+        throw new RuntimeException('Generated N:M association DELETE did not detach the related model.');
     }
     [$postUpdateStatus] = $request(
         $kernel,
@@ -594,7 +640,11 @@ PHP);
         throw new RuntimeException('An ambiguous migration changed the structural index.');
     }
 
-    fwrite(STDOUT, "PASS full relation:make CRUD/API flow, migrations, route:list, HTTP, idempotency, and conflicts\n");
+    fwrite(
+        STDOUT,
+        "PASS full relation:make CRUD/API flow, inline routes, N:M assignment, migrations, HTTP, "
+        . "idempotency, and conflicts\n"
+    );
 } finally {
     if (is_dir($projectRoot)) {
         $iterator = new RecursiveIteratorIterator(
