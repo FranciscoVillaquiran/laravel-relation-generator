@@ -278,23 +278,53 @@ class RelationMakeCommand extends Command
                 );
             }
 
+            $relations = $generatedRelations ?? $generator->relationNames($definition);
+            $associationA = [];
+            $associationB = [];
+            $apiAssociations = [];
+            if ($definition->cardinality === 'N:M') {
+                $classA = $this->modelClass($modelA);
+                $classB = $this->modelClass($modelB);
+                $associationA[] = [
+                    'relatedModelClass' => $classB,
+                    'relation' => $relations['relationA'],
+                ];
+                $associationB[] = [
+                    'relatedModelClass' => $classA,
+                    'relation' => $relations['relationB'],
+                ];
+                $apiAssociations = [
+                    [
+                        'parentModelClass' => $classA,
+                        'relatedModelClass' => $classB,
+                        'relation' => $relations['relationA'],
+                    ],
+                    [
+                        'parentModelClass' => $classB,
+                        'relatedModelClass' => $classA,
+                        'relation' => $relations['relationB'],
+                    ],
+                ];
+            }
+
             if ($crud) {
                 $crudGenerator = new CrudGenerator();
                 $crudGenerator->generateFromTable(
                     $temporaryRoot,
                     $this->modelClass($modelA),
                     $schema->table($definition->modelATable),
-                    $schema
+                    $schema,
+                    $associationA
                 );
                 $crudGenerator->generateFromTable(
                     $temporaryRoot,
                     $this->modelClass($modelB),
                     $schema->table($definition->modelBTable),
-                    $schema
+                    $schema,
+                    $associationB
                 );
             }
 
-            $relations = $generatedRelations ?? $generator->relationNames($definition);
             if (in_array('queries', $selected, true)) {
                 (new QueryGenerator())->generate(
                     $temporaryRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
@@ -315,7 +345,8 @@ class RelationMakeCommand extends Command
             if ($api) {
                 (new \Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator())->generate(
                     $temporaryRoot,
-                    [$this->modelClass($modelA), $this->modelClass($modelB)]
+                    [$this->modelClass($modelA), $this->modelClass($modelB)],
+                    $apiAssociations
                 );
             }
 
@@ -339,6 +370,13 @@ class RelationMakeCommand extends Command
                 $realPath = $projectRoot . DIRECTORY_SEPARATOR . $relativePath;
                 if (!is_file($realPath) || file_get_contents($realPath) !== $contents) {
                     $changes[$realPath] = $contents;
+                }
+            }
+            foreach ($targets as $relativePath) {
+                $stagePath = $temporaryRoot . DIRECTORY_SEPARATOR . $relativePath;
+                $realPath = $projectRoot . DIRECTORY_SEPARATOR . $relativePath;
+                if (!is_file($stagePath) && is_file($realPath)) {
+                    $changes[$realPath] = null;
                 }
             }
 

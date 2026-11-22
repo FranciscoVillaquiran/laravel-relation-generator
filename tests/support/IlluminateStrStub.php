@@ -38,6 +38,11 @@ class Str
         return lcfirst(str_replace(' ', '', ucwords(str_replace(['-', '_'], ' ', $value))));
     }
 
+    public static function studly(string $value): string
+    {
+        return ucfirst(self::camel($value));
+    }
+
     public static function plural(string $value): string
     {
         $irregular = [

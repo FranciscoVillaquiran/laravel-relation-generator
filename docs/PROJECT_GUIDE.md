@@ -1,6 +1,6 @@
 # Diseño y funcionamiento de Laravel Relation Generator
 
-Este documento describe la arquitectura actual de LRG `v3.0.0`, incluyendo
+Este documento describe la arquitectura actual de LRG `v3.1.0`, incluyendo
 las capacidades heredadas y las limitaciones que requieren decisiones o
 configuración de la aplicación.
 
@@ -63,8 +63,8 @@ src/
 | `Generators/QueryGenerator.php` | Crea o actualiza `ConsultasController` con métodos que cargan relaciones. |
 | `Generators/RouteGenerator.php` | Añade rutas GET que apuntan a los métodos del controlador. |
 | `Generators/CrudGenerator.php` | Genera controladores CRUD sencillos que delegan las operaciones a Eloquent. |
-| `Generators/ApiRouteGenerator.php` | Acumula recursos en `routes/lrg_api.php` y mantiene una inclusión en `routes/api.php`. |
-| `Generators/FileChangeTransaction.php` | Conserva backups, aplica escrituras preparadas y recupera archivos si la operación falla. |
+| `Generators/ApiRouteGenerator.php` | Registra recursos y asociaciones directamente en `routes/api.php` y migra rutas de versiones anteriores. |
+| `Generators/FileChangeTransaction.php` | Conserva backups, aplica escrituras y eliminaciones preparadas y recupera archivos si la operación falla. |
 
 El autoload PSR-4 del paquete usa el prefijo
 `Franciscovillaquiran\LaravelRelationGenerator\` para el directorio `src/`.
@@ -318,7 +318,7 @@ heredada permanece independiente de las rutas CRUD API.
 | Consultas heredadas | `app/Http/Controllers/ConsultasController.php` |
 | Rutas web heredadas | `routes/web.php` |
 | `--crud` | `app/Http/Controllers/Api/ModelAController.php`, `ModelBController.php` |
-| `--api` | `routes/lrg_api.php` y una inclusión administrada en `routes/api.php` |
+| `--api` | Bloque administrado de recursos y asociaciones en `routes/api.php`; elimina el archivo de rutas antiguo al migrarlo |
 | Esquema estructural | `.lrg/lrg-index.json`, solo al completar el flujo con éxito |
 
 Si se seleccionan varias operaciones, el comando puede modificar los mismos
@@ -600,7 +600,9 @@ DatabaseSchema::toArray(): array{tables: array, relations: list<array>, migratio
 
 Los consumidores pueden usar `DatabaseSchema` o su serialización normalizada.
 El analizador no ejecuta CRUD ni migraciones; el generador CRUD consume los
-metadatos existentes y no crea controladores para tablas pivote.
+metadatos existentes y no crea un CRUD independiente para tablas pivote. Para
+relaciones N:M con `--crud --api`, genera endpoints de asociación en ambos
+modelos relacionados.
 
 ## 15. Generación estructural de relaciones y `$fillable` (tercer incremento LRG 2.0)
 
@@ -674,9 +676,12 @@ existe.
 La asignación usa los `$fillable` generados estructuralmente para los modelos;
 el generador no inspecciona tipos de columna, claves foráneas ni índices para
 crear reglas de entrada. Las restricciones del esquema se mantienen en la
-base de datos. No agrega filtros, paginación, autenticación, autorización, ni
-`attach()`, `detach()` o `sync()`. Si el controlador ya existe y no es idéntico
-al generado por LRG, lo conserva y rechaza la operación.
+base de datos. No agrega filtros, paginación, autenticación ni autorización.
+Para una relación N:M, ambos controladores CRUD incluyen acciones anidadas para
+agregar y quitar un registro relacionado mediante `syncWithoutDetaching()` y
+`detach()`. Las rutas se registran como POST y DELETE en `routes/api.php`.
+Si el controlador ya existe y no es idéntico al generado por LRG (o a su
+versión CRUD simple anterior), lo conserva y rechaza la operación.
 
 Con `--api`, `ApiRouteGenerator` registra cada entidad solicitada mediante
 `Route::apiResource()`. Los recursos usan snake_case plural (`users`,
@@ -685,18 +690,19 @@ PUT/PATCH recurso y DELETE recurso, sin las acciones web `create`/`edit`.
 Las invocaciones sucesivas acumulan recursos administrados previamente y no
 duplican rutas.
 
-El generador administra solo el bloque delimitado por marcadores en
-`routes/lrg_api.php`; el contenido manual fuera de ese bloque se conserva.
-Añade una sola inclusión marcada `require_once` al final de `routes/api.php`,
-sin tocar `routes/web.php`. El archivo API debe existir y estar registrado en
-Laravel.
+El generador administra un bloque delimitado por marcadores en `routes/api.php`
+y conserva las rutas manuales fuera de ese bloque. Al migrar desde versiones
+anteriores, mueve las rutas manuales que estaban fuera del bloque antiguo y
+las rutas CRUD administradas desde `routes/lrg_api.php`; después elimina ese
+archivo obsoleto. No modifica `routes/web.php`. El archivo API debe existir y
+estar registrado en Laravel.
 
 Antes de escribir comprueba la carga de `routes/api.php` mediante la
 configuración estática `withRouting(api: ...)` de Laravel 11+ o el grupo API
 convencional (`middleware('api')`, `prefix('api')`) del `RouteServiceProvider`
 de Laravel 10. `withRouting(using: ...)` y otras configuraciones no
-verificables se rechazan. Comprueba también el namespace, clase y cinco
-métodos públicos de todos los controladores CRUD planificados.
+verificables se rechazan. Comprueba también el namespace, clase y métodos
+públicos CRUD y de asociación de los controladores planificados.
 
 Detecta llamadas estáticas de rutas manuales con URI solapada, nombres
 convencionales en uso, importaciones `Route` incompatibles y bloques
@@ -717,17 +723,17 @@ php tests/full_generation_integration.php <ruta-a-vendor/autoload.php>
 
 La integración crea una aplicación temporal con migraciones SQLite, ejecuta
 `relation:make` dos veces para las tres cardinalidades, comprueba los métodos
-Eloquent, `php artisan route:list`, operaciones CRUD HTTP, actualizaciones
+Eloquent, `php artisan route:list`, operaciones CRUD HTTP, asignación y
+desasignación N:M, migración de rutas API a `routes/api.php`, actualizaciones
 parciales, preservación de rutas web, el conflicto con un controlador manual,
 el rechazo de una migración ambigua y una falla controlada después de una
 escritura parcial; verifica que los archivos generados y el índice se
 recuperen. `tests/run.php` también inyecta un fallo de escritura para probar
 el rollback transaccional directamente.
 
-Combinaciones ejecutadas en este entorno:
+Combinación ejecutada en este entorno:
 
-- PHP 8.3.33 con Laravel Framework 12.73.0: pruebas integrales aprobadas.
-- PHP 8.3.33 con Laravel Framework 13.43.0: pruebas integrales aprobadas.
+- PHP 8.3.33 con Laravel Framework 12.72.0: pruebas integrales aprobadas.
 - Los patrones estáticos de registro API para Laravel 10 y 11 se cubren en
   `tests/run.php`, pero no se ejecutó el flujo integral completo sobre esas
   versiones ni se validó PHP 8.1/8.2 en este entorno.

@@ -666,7 +666,19 @@ $test('generates simple idempotent CRUD controllers and protects manual controll
             . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api'
             . DIRECTORY_SEPARATOR . 'PostController.php';
 
-        assertSameValue(true, $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema));
+        $postAssociations = [
+            ['relatedModelClass' => 'App\\Models\\Tag', 'relation' => 'tags'],
+        ];
+        assertSameValue(
+            true,
+            $generator->generateFromTable(
+                $projectRoot,
+                'App\\Models\\Post',
+                $posts,
+                $schema,
+                $postAssociations
+            )
+        );
         $source = file_get_contents($controllerPath);
         token_get_all($source, TOKEN_PARSE);
         assertSameValue(true, str_contains($source, 'public function index()'));
@@ -674,14 +686,27 @@ $test('generates simple idempotent CRUD controllers and protects manual controll
         assertSameValue(true, str_contains($source, 'public function show(string $id)'));
         assertSameValue(true, str_contains($source, 'public function update(Request $request, string $id)'));
         assertSameValue(true, str_contains($source, 'public function destroy(string $id)'));
-        assertSameValue(true, str_contains($source, 'Post::create($request->all())'));
+        assertSameValue(true, str_contains($source, '$record->fill($request->all())'));
+        assertSameValue(true, str_contains($source, '$record->timestamps = false;'));
         assertSameValue(true, str_contains($source, 'Post::findOrFail($id)'));
         assertSameValue(true, str_contains($source, '$record->update($request->all())'));
         assertSameValue(true, str_contains($source, '$record->delete()'));
+        assertSameValue(true, str_contains($source, 'public function attachTag(string $post, string $tag)'));
+        assertSameValue(true, str_contains($source, 'public function detachTag(string $post, string $tag)'));
+        assertSameValue(true, str_contains($source, '$parentRecord->tags()->syncWithoutDetaching'));
         assertSameValue(false, str_contains($source, 'validate('));
         assertSameValue(false, str_contains($source, 'QueryException'));
         assertSameValue(false, str_contains($source, 'Rule::'));
-        assertSameValue(false, $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema));
+        assertSameValue(
+            false,
+            $generator->generateFromTable(
+                $projectRoot,
+                'App\\Models\\Post',
+                $posts,
+                $schema,
+                $postAssociations
+            )
+        );
         assertSameValue($source, file_get_contents($controllerPath));
 
         $usersController = $projectRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
@@ -691,11 +716,19 @@ $test('generates simple idempotent CRUD controllers and protects manual controll
         $usersSource = file_get_contents($usersController);
         token_get_all($usersSource, TOKEN_PARSE);
         assertSameValue(false, str_contains($usersSource, 'rules('));
+        assertSameValue(true, str_contains($usersSource, 'User::create($request->all())'));
+        assertSameValue(false, str_contains($usersSource, '$record->timestamps = false;'));
 
         $manualSource = $source . "// manual edit\n";
         file_put_contents($controllerPath, $manualSource);
         try {
-            $generator->generateFromTable($projectRoot, 'App\\Models\\Post', $posts, $schema);
+            $generator->generateFromTable(
+                $projectRoot,
+                'App\\Models\\Post',
+                $posts,
+                $schema,
+                $postAssociations
+            );
             throw new RuntimeException('Expected an edited generated controller to be protected.');
         } catch (RuntimeException $exception) {
             assertSameValue(true, str_contains($exception->getMessage(), 'already exists'));
@@ -755,22 +788,25 @@ $test('rolls back all watched files after a controlled write failure', static fu
     $second = $root . DIRECTORY_SEPARATOR . 'second.php';
     $new = $root . DIRECTORY_SEPARATOR . 'new.php';
     $index = $root . DIRECTORY_SEPARATOR . 'index.json';
+    $obsolete = $root . DIRECTORY_SEPARATOR . 'obsolete.php';
     file_put_contents($first, '<?php $value = 1;');
     file_put_contents($second, '<?php $value = 2;');
     file_put_contents($index, '{"schema":"original"}');
+    file_put_contents($obsolete, '<?php $value = "legacy";');
     $writes = 0;
     $transaction = new FileChangeTransaction(static function () use (&$writes): void {
-        if (++$writes === 3) {
+        if (++$writes === 4) {
             throw new RuntimeException('controlled write failure');
         }
     });
 
     try {
-        $transaction->watch([$first, $second, $new, $index]);
+        $transaction->watch([$first, $second, $new, $index, $obsolete]);
         try {
             $transaction->apply([
                 $first => '<?php $value = 10;',
                 $new => '<?php $value = 30;',
+                $obsolete => null,
                 $second => '<?php $value = 20;',
             ]);
             throw new RuntimeException('Expected the controlled write to fail.');
@@ -780,6 +816,7 @@ $test('rolls back all watched files after a controlled write failure', static fu
         assertSameValue('<?php $value = 1;', file_get_contents($first));
         assertSameValue('<?php $value = 2;', file_get_contents($second));
         assertSameValue('{"schema":"original"}', file_get_contents($index));
+        assertSameValue('<?php $value = "legacy";', file_get_contents($obsolete));
         assertSameValue(false, file_exists($new));
         assertSameValue([], glob($root . DIRECTORY_SEPARATOR . '.lrg-backup-*'));
     } finally {
@@ -1021,10 +1058,16 @@ $test('generates API resources without changing web routes and protects manual r
         "<?php\nreturn Application::configure(basePath: dirname(__DIR__))"
             . "->withRouting(api: __DIR__ . '/../routes/api.php')->create();\n"
     );
-    $apiOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+    $apiOriginal = "<?php\ndeclare(strict_types=1);\n\nuse Illuminate\\Support\\Facades\\Route;\n\n"
         . "Route::get('/health', fn () => 'ok');\n"
-        . "Route::match(['OPTIONS'], '/users', fn () => null);\n";
-    $managedManualOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\nRoute::get('/local-health', fn () => 'ok');\n";
+        . "Route::match(['OPTIONS'], '/users', fn () => null);\n"
+        . "// LRG API ROUTES INCLUDE\nrequire_once __DIR__ . '/lrg_api.php';\n";
+    $managedManualOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\nuse Illuminate\\Support\\Arr;\n\n"
+        . "Route::get('/local-health', fn () => Arr::first(['ok']));\n\n"
+        . "// LRG API RESOURCES BEGIN\n"
+        . "Route::apiResource('users', \\App\\Http\\Controllers\\Api\\UserController::class);\n"
+        . "Route::apiResource('blog_posts', \\App\\Http\\Controllers\\Api\\BlogPostController::class);\n"
+        . "// LRG API RESOURCES END\n";
     $webOriginal = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\nRoute::get('/', fn () => 'home');\n";
     file_put_contents($apiRoutesPath, $apiOriginal);
     file_put_contents($managedRoutesPath, $managedManualOriginal);
@@ -1042,6 +1085,10 @@ class %sController
     public function show() {}
     public function update() {}
     public function destroy() {}
+    public function attachBlogPost() {}
+    public function detachBlogPost() {}
+    public function attachUser() {}
+    public function detachUser() {}
 }
 PHP;
     foreach (['User', 'BlogPost'] as $model) {
@@ -1053,29 +1100,49 @@ PHP;
 
     try {
         $generator = new ApiRouteGenerator();
-        $generator->generate($projectRoot, ['App\\Models\\User']);
-        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
-        $managedSource = file_get_contents($managedRoutesPath);
+        $associations = [
+            [
+                'parentModelClass' => 'App\\Models\\User',
+                'relatedModelClass' => 'App\\Models\\BlogPost',
+                'relation' => 'blogPosts',
+            ],
+            [
+                'parentModelClass' => 'App\\Models\\BlogPost',
+                'relatedModelClass' => 'App\\Models\\User',
+                'relation' => 'users',
+            ],
+        ];
+        $generator->generate($projectRoot, ['App\\Models\\User'], $associations);
+        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost'], $associations);
         $apiSource = file_get_contents($apiRoutesPath);
 
-        assertRouteContains('use Illuminate\\Support\\Facades\\Route;', $managedSource);
+        assertRouteContains('use Illuminate\\Support\\Facades\\Route;', $apiSource);
         assertRouteContains(
             "Route::apiResource('users', \\App\\Http\\Controllers\\Api\\UserController::class);",
-            $managedSource
+            $apiSource
         );
         assertRouteContains(
             "Route::apiResource('blog_posts', \\App\\Http\\Controllers\\Api\\BlogPostController::class);",
-            $managedSource
+            $apiSource
         );
-        assertRouteContains("Route::get('/local-health'", $managedSource);
+        assertRouteContains("Route::get('/local-health'", $apiSource);
+        assertRouteContains('use Illuminate\\Support\\Arr;', $apiSource);
         assertRouteContains("Route::get('/health'", $apiSource);
-        assertSameValue(1, substr_count($apiSource, 'lrg_api.php'));
+        assertRouteContains(
+            "Route::post('/users/{user}/blog_posts/{blogPost}', [\\App\\Http\\Controllers\\Api\\UserController::class, 'attachBlogPost']);",
+            $apiSource
+        );
+        assertRouteContains(
+            "Route::delete('/blog_posts/{blogPost}/users/{user}', [\\App\\Http\\Controllers\\Api\\BlogPostController::class, 'detachUser']);",
+            $apiSource
+        );
+        assertSameValue(false, str_contains($apiSource, 'lrg_api.php'));
+        assertSameValue(false, file_exists($managedRoutesPath));
 
         $generatedApi = $apiSource;
-        $generatedManaged = $managedSource;
-        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
+        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost'], $associations);
         assertSameValue($generatedApi, file_get_contents($apiRoutesPath));
-        assertSameValue($generatedManaged, file_get_contents($managedRoutesPath));
+        assertSameValue(false, file_exists($managedRoutesPath));
         assertSameValue($webOriginal, file_get_contents($webRoutesPath));
 
         (new Franciscovillaquiran\LaravelRelationGenerator\Generators\RouteGenerator())->generate(
@@ -1085,7 +1152,7 @@ PHP;
         );
         $webWithLegacyRoutes = file_get_contents($webRoutesPath);
         assertRouteContains('/consultas/user-blog-post', $webWithLegacyRoutes);
-        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost']);
+        $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost'], $associations);
         assertSameValue($webWithLegacyRoutes, file_get_contents($webRoutesPath));
 
         file_put_contents(
@@ -1093,7 +1160,7 @@ PHP;
             rtrim(file_get_contents($apiRoutesPath))
                 . "\nRoute::delete('/users/{user}', fn () => null);\n"
         );
-        $beforeConflict = file_get_contents($managedRoutesPath);
+        $beforeConflict = file_get_contents($apiRoutesPath);
         try {
             $generator->generate($projectRoot, ['App\\Models\\User']);
             throw new RuntimeException('Expected an overlapping API route to be rejected.');
@@ -1101,7 +1168,7 @@ PHP;
             if (!str_contains($exception->getMessage(), 'Route conflict')) {
                 throw new RuntimeException('Unexpected API conflict result: ' . $exception->getMessage());
             }
-            assertSameValue($beforeConflict, file_get_contents($managedRoutesPath));
+            assertSameValue($beforeConflict, file_get_contents($apiRoutesPath));
         }
 
         $apiWithoutUriConflict = str_replace(
@@ -1187,7 +1254,7 @@ PHP;
         );
         $generator->generate($providerRoot, ['App\\Models\\User']);
         assertSameValue(
-            true,
+            false,
             file_exists($providerRoutes . DIRECTORY_SEPARATOR . 'lrg_api.php')
         );
     } finally {

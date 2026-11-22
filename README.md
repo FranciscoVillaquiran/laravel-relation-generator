@@ -51,6 +51,7 @@ LRG restores the previous project files. The structural index
 
 The package follows semantic versioning through Git tags (`vMAJOR.MINOR.PATCH`).
 The direct, validation-free CRUD controller behavior is introduced in `v3.0.0`.
+Inline API routes and many-to-many association endpoints are introduced in `v3.1.0`.
 
 ## Structural migration analysis
 
@@ -79,22 +80,43 @@ The full command integration test runs against a Laravel autoloader:
 php tests/full_generation_integration.php <path-to-vendor/autoload.php>
 ```
 
-It exercises all three cardinalities, CRUD HTTP responses, `route:list`,
-idempotency, manual conflicts, migration ambiguity, and rollback after a
-controlled write failure. The supported package
+It exercises all three cardinalities, CRUD HTTP responses, many-to-many
+assignment/removal, routes written directly to `routes/api.php`, idempotency,
+manual conflicts, migration ambiguity, and rollback after a controlled write
+failure. The supported package
 constraints remain PHP `^8.1` and Laravel 10–13; this integration has been run
-on PHP 8.3.33 with Laravel 12.73.0 and 13.43.0.
+on PHP 8.3.33 with Laravel 12.72.0.
 
-## API route organization
+## API routes and many-to-many associations
 
-The command manages resources in `routes/lrg_api.php` and adds a marked
-`require_once` include to `routes/api.php`. It preserves manual routes and
-`routes/web.php`. Laravel must already load `routes/api.php`; configurations
-that cannot be verified are rejected.
+The command writes managed `Route::apiResource()` declarations directly into a
+marked block in `routes/api.php`. When upgrading from an earlier release, it
+migrates the old managed routes and manual routes from `routes/lrg_api.php`
+into `routes/api.php`, then removes the obsolete file. It preserves unrelated
+routes and `routes/web.php`. Laravel must already load `routes/api.php`;
+configurations that cannot be verified are rejected.
+
+For an N:M relation generated with `--crud --api`, both controllers gain
+nested `POST`/`DELETE` endpoints. For example:
+
+```text
+POST   /api/posts/{post}/tags/{tag}
+DELETE /api/posts/{post}/tags/{tag}
+```
+
+The POST attaches the existing tag to the post; DELETE detaches it. The
+relationship methods generated on both Eloquent models remain available for
+listing related records.
 
 ```php
 (new \Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator())
-    ->generate(base_path(), ['App\\Models\\User', 'App\\Models\\BlogPost']);
+    ->generate(base_path(), ['App\\Models\\Post', 'App\\Models\\Tag'], [
+        [
+            'parentModelClass' => 'App\\Models\\Post',
+            'relatedModelClass' => 'App\\Models\\Tag',
+            'relation' => 'tags',
+        ],
+    ]);
 ```
 
 The API route generator is also available independently when CRUD controllers
