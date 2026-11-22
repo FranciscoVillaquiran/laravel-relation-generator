@@ -46,11 +46,16 @@ class ApiRouteGenerator
             $this->normalizeModels($modelClasses)
         );
 
-        $associationRoutes = array_merge(
+        $existingAssociationRoutes = array_merge(
             $legacySource === null ? [] : $this->managedAssociationRoutes($legacySource, $managedRoutesPath),
-            $this->managedAssociationRoutes($apiSource, $apiRoutesPath),
-            $this->normalizeAssociations($associations, $models)
+            $this->managedAssociationRoutes($apiSource, $apiRoutesPath)
         );
+        $requestedAssociationRoutes = $this->normalizeAssociations($associations, $models);
+        $existingAssociationRoutes = $this->removeSupersededAssociationRoutes(
+            $existingAssociationRoutes,
+            $requestedAssociationRoutes
+        );
+        $associationRoutes = array_merge($existingAssociationRoutes, $requestedAssociationRoutes);
         $associationRoutes = $this->uniqueAssociationRoutes($associationRoutes);
         $requiredActions = [];
         foreach ($associationRoutes as $association) {
@@ -208,7 +213,7 @@ class ApiRouteGenerator
     }
 
     /**
-     * @return list<array{method: string, uri: string, controller: string, action: string, line: string}>
+     * @return list<array{method: string, uri: string, controller: string, action: string, line: string, legacyUris?: list<string>}>
      */
     private function managedAssociationRoutes(string $source, string $path): array
     {
@@ -226,7 +231,7 @@ class ApiRouteGenerator
     private function parseManagedAssociationRoute(string $line): ?array
     {
         if (!preg_match(
-            '/^\s*Route::(post|delete)\([\'"]([^\'"]+)[\'"],\s*\[\\\\App\\\\Http\\\\Controllers\\\\Api\\\\([A-Za-z_][A-Za-z0-9_]*)::class,\s*[\'"]((?:attach|detach)[A-Za-z_][A-Za-z0-9_]*)[\'"]\]\);\s*$/',
+            '/^\s*Route::(put|post|delete)\([\'"]([^\'"]+)[\'"],\s*\[\\\\App\\\\Http\\\\Controllers\\\\Api\\\\([A-Za-z_][A-Za-z0-9_]*)::class,\s*[\'"]((?:sync|attach|detach)[A-Za-z_][A-Za-z0-9_]*)[\'"]\]\);\s*$/',
             $line,
             $matches
         )) {
@@ -245,7 +250,7 @@ class ApiRouteGenerator
     /**
      * @param list<array{parentModelClass: string, relatedModelClass: string, relation: string}> $associations
      * @param list<array{class: string, controller: string, resource: string}> $models
-     * @return list<array{method: string, uri: string, controller: string, action: string, line: string}>
+     * @return list<array{method: string, uri: string, controller: string, action: string, line: string, legacyUris?: list<string>}>
      */
     private function normalizeAssociations(array $associations, array $models): array
     {
@@ -274,23 +279,44 @@ class ApiRouteGenerator
             $controller = $parentName . 'Controller';
             $methodSuffix = Str::studly($relatedName);
 
-            foreach ([
-                ['post', 'attach' . $methodSuffix],
-                ['delete', 'detach' . $methodSuffix],
-            ] as [$method, $action]) {
-                $uri = "/{$parentResource}/{{$parentParameter}}/{$relatedResource}/{{$relatedParameter}}";
-                $line = "Route::{$method}('{$uri}', [\\App\\Http\\Controllers\\Api\\{$controller}::class, '{$action}']);";
-                $routes[] = [
-                    'method' => $method,
-                    'uri' => $uri,
-                    'controller' => $controller,
-                    'action' => $action,
-                    'line' => $line,
-                ];
-            }
+            $uri = "/{$parentResource}/{{$parentParameter}}/{$relatedResource}";
+            $action = 'sync' . $methodSuffix;
+            $line = "Route::put('{$uri}', [\\App\\Http\\Controllers\\Api\\{$controller}::class, '{$action}']);";
+            $routes[] = [
+                'method' => 'put',
+                'uri' => $uri,
+                'controller' => $controller,
+                'action' => $action,
+                'line' => $line,
+                'legacyUris' => [
+                    $uri . "/{{$relatedParameter}}",
+                    "/{$relatedResource}/{{$relatedParameter}}/{$parentResource}/{{$parentParameter}}",
+                ],
+            ];
         }
 
         return $routes;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $existingRoutes
+     * @param list<array<string, mixed>> $requestedRoutes
+     * @return list<array<string, mixed>>
+     */
+    private function removeSupersededAssociationRoutes(array $existingRoutes, array $requestedRoutes): array
+    {
+        $legacyUris = [];
+        foreach ($requestedRoutes as $route) {
+            foreach ($route['legacyUris'] as $uri) {
+                $legacyUris[$uri] = true;
+            }
+        }
+
+        return array_values(array_filter(
+            $existingRoutes,
+            static fn (array $route): bool => !in_array($route['method'], ['post', 'delete'], true)
+                || !isset($legacyUris[$route['uri']])
+        ));
     }
 
     private function normalizeModelClass(mixed $modelClass): string
@@ -914,7 +940,7 @@ class ApiRouteGenerator
             }
             $methodIndex = $this->nextSignificantToken($tokens, $scope + 1);
             if ($methodIndex === null || !is_array($tokens[$methodIndex])
-                || !in_array(strtolower($tokens[$methodIndex][1]), ['post', 'delete', 'match', 'any'], true)) {
+                || !in_array(strtolower($tokens[$methodIndex][1]), ['put', 'post', 'delete', 'match', 'any'], true)) {
                 continue;
             }
             $method = strtolower($tokens[$methodIndex][1]);
