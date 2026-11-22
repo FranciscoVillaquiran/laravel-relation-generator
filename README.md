@@ -52,6 +52,8 @@ LRG restores the previous project files. The structural index
 The package follows semantic versioning through Git tags (`vMAJOR.MINOR.PATCH`).
 The direct, validation-free CRUD controller behavior is introduced in `v3.0.0`.
 Inline API routes and many-to-many association endpoints are introduced in `v3.1.0`.
+Many-to-many assignment through a CRUD field and one owner route are introduced
+in `v3.2.0`.
 
 ## Structural migration analysis
 
@@ -96,17 +98,24 @@ into `routes/api.php`, then removes the obsolete file. It preserves unrelated
 routes and `routes/web.php`. Laravel must already load `routes/api.php`;
 configurations that cannot be verified are rejected.
 
-For an N:M relation generated with `--crud --api`, both controllers gain
-nested `POST`/`DELETE` endpoints. For example:
+For an N:M relation generated with `--crud --api`, the first model's controller
+owns the assignment. Its create and update endpoints accept `related_ids` as
+an array of existing related-model IDs:
 
-```text
-POST   /api/posts/{post}/tags/{tag}
-DELETE /api/posts/{post}/tags/{tag}
+```json
+{
+  "title": "My post",
+  "related_ids": [2, 5]
+}
 ```
 
-The POST attaches the existing tag to the post; DELETE detaches it. The
-relationship methods generated on both Eloquent models remain available for
-listing related records.
+On update, omitting `related_ids` leaves the existing assignments unchanged;
+including it replaces them (an empty array clears them). A single additional
+route can also replace assignments directly, for example
+`PUT /api/posts/{post}/tags` with `{"related_ids":[2,5]}`. The response includes
+the updated relation when assignments are supplied. The second model does not
+receive duplicate association routes. Both Eloquent relationship methods
+remain available for listing related records.
 
 ```php
 (new \Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator())

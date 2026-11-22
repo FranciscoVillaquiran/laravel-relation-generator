@@ -281,6 +281,8 @@ class RelationMakeCommand extends Command
             $relations = $generatedRelations ?? $generator->relationNames($definition);
             $associationA = [];
             $associationB = [];
+            $legacyAssociationA = [];
+            $legacyAssociationB = [];
             $apiAssociations = [];
             if ($definition->cardinality === 'N:M') {
                 $classA = $this->modelClass($modelA);
@@ -289,7 +291,8 @@ class RelationMakeCommand extends Command
                     'relatedModelClass' => $classB,
                     'relation' => $relations['relationA'],
                 ];
-                $associationB[] = [
+                $legacyAssociationA = $associationA;
+                $legacyAssociationB[] = [
                     'relatedModelClass' => $classA,
                     'relation' => $relations['relationB'],
                 ];
@@ -298,11 +301,6 @@ class RelationMakeCommand extends Command
                         'parentModelClass' => $classA,
                         'relatedModelClass' => $classB,
                         'relation' => $relations['relationA'],
-                    ],
-                    [
-                        'parentModelClass' => $classB,
-                        'relatedModelClass' => $classA,
-                        'relation' => $relations['relationB'],
                     ],
                 ];
             }
@@ -314,14 +312,16 @@ class RelationMakeCommand extends Command
                     $this->modelClass($modelA),
                     $schema->table($definition->modelATable),
                     $schema,
-                    $associationA
+                    $associationA,
+                    $legacyAssociationA
                 );
                 $crudGenerator->generateFromTable(
                     $temporaryRoot,
                     $this->modelClass($modelB),
                     $schema->table($definition->modelBTable),
                     $schema,
-                    $associationB
+                    $associationB,
+                    $legacyAssociationB
                 );
             }
 

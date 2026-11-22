@@ -376,9 +376,8 @@ PHP);
         'ProductController@store',
         'PostController@destroy',
         'TagController@update',
-        'api/posts/{post}/tags/{tag}',
-        'PostController@attachTag',
-        'TagController@attachPost',
+        'api/posts/{post}/tags',
+        'PostController@syncTag',
     ] as $expected) {
         if (!str_contains($routeList, $expected)) {
             throw new RuntimeException("route:list omitted {$expected}:\n{$routeList}");
@@ -464,46 +463,71 @@ PHP);
         throw new RuntimeException("User delete returned HTTP {$userDeleteStatus}, expected 204.");
     }
 
-    [$postStatus, $postResponse] = $request($kernel, 'POST', '/api/posts', ['title' => 'API post']);
     [$tagStatus, $tagResponse] = $request($kernel, 'POST', '/api/tags', ['name' => 'API tag']);
-    if ($postStatus !== 201 || $tagStatus !== 201) {
+    [$secondTagStatus, $secondTagResponse] = $request($kernel, 'POST', '/api/tags', ['name' => 'Second API tag']);
+    if ($tagStatus !== 201 || $secondTagStatus !== 201) {
         throw new RuntimeException('N:M participant CRUD creation did not return HTTP 201.');
     }
-    [$associationStatus] = $request(
+    [$postStatus, $postResponse] = $request(
         $kernel,
         'POST',
-        '/api/posts/' . $postResponse['id'] . '/tags/' . $tagResponse['id']
+        '/api/posts',
+        ['title' => 'API post', 'related_ids' => [$tagResponse['id']]]
     );
-    if ($associationStatus !== 201) {
-        throw new RuntimeException("N:M association POST returned HTTP {$associationStatus}, expected 201.");
+    if ($postStatus !== 201) {
+        throw new RuntimeException("N:M post creation returned HTTP {$postStatus}, expected 201.");
     }
     $postModel = App\Models\Post::findOrFail($postResponse['id']);
     if (!$postModel->fresh()->tags->contains('id', $tagResponse['id'])) {
-        throw new RuntimeException('Generated N:M association POST did not attach the related model.');
+        throw new RuntimeException('N:M creation field did not attach the selected related model.');
     }
-    [$disassociationStatus] = $request(
-        $kernel,
-        'DELETE',
-        '/api/posts/' . $postResponse['id'] . '/tags/' . $tagResponse['id']
-    );
-    if ($disassociationStatus !== 204) {
-        throw new RuntimeException("N:M association DELETE returned HTTP {$disassociationStatus}, expected 204.");
-    }
-    if ($postModel->fresh()->tags->contains('id', $tagResponse['id'])) {
-        throw new RuntimeException('Generated N:M association DELETE did not detach the related model.');
-    }
-    [$postUpdateStatus] = $request(
+    [$postUpdateStatus, $updatedPost] = $request(
         $kernel,
         'PATCH',
         '/api/posts/' . $postResponse['id'],
-        ['title' => 'Updated API post']
+        ['title' => 'Updated API post', 'related_ids' => [$secondTagResponse['id']]]
     );
-    if ($postUpdateStatus !== 200) {
-        throw new RuntimeException("Post partial update returned HTTP {$postUpdateStatus}, expected 200.");
+    if ($postUpdateStatus !== 200 || $updatedPost['title'] !== 'Updated API post') {
+        throw new RuntimeException("N:M post update returned HTTP {$postUpdateStatus}, expected 200.");
+    }
+    $currentTagIds = $postModel->fresh()->tags->pluck('id')->all();
+    if ($currentTagIds !== [$secondTagResponse['id']]) {
+        throw new RuntimeException('N:M update field did not replace the selected related models.');
+    }
+    [$clearRelationsStatus] = $request(
+        $kernel,
+        'PATCH',
+        '/api/posts/' . $postResponse['id'],
+        ['related_ids' => []]
+    );
+    if ($clearRelationsStatus !== 200 || $postModel->fresh()->tags->isNotEmpty()) {
+        throw new RuntimeException('An empty related_ids field did not clear the N:M assignments.');
+    }
+    [$associationStatus] = $request(
+        $kernel,
+        'PUT',
+        '/api/posts/' . $postResponse['id'] . '/tags',
+        ['related_ids' => [$tagResponse['id']]]
+    );
+    if ($associationStatus !== 200) {
+        throw new RuntimeException("N:M assignment PUT returned HTTP {$associationStatus}, expected 200.");
+    }
+    if ($postModel->fresh()->tags->pluck('id')->all() !== [$tagResponse['id']]) {
+        throw new RuntimeException('N:M assignment route did not replace the selected related models.');
+    }
+    [$partialUpdateStatus] = $request(
+        $kernel,
+        'PATCH',
+        '/api/posts/' . $postResponse['id'],
+        ['title' => 'Updated again without changing tags']
+    );
+    if ($partialUpdateStatus !== 200 || $postModel->fresh()->tags->pluck('id')->all() !== [$tagResponse['id']]) {
+        throw new RuntimeException('Omitting related_ids from a partial update changed the existing assignment.');
     }
     foreach ([
         ['posts', $postResponse['id']],
         ['tags', $tagResponse['id']],
+        ['tags', $secondTagResponse['id']],
     ] as [$resource, $id]) {
         [$deleteStatus] = $request($kernel, 'DELETE', "/api/{$resource}/{$id}");
         if ($deleteStatus !== 204) {

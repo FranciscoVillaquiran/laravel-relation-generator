@@ -1,6 +1,6 @@
 # Diseño y funcionamiento de Laravel Relation Generator
 
-Este documento describe la arquitectura actual de LRG `v3.1.0`, incluyendo
+Este documento describe la arquitectura actual de LRG `v3.2.0`, incluyendo
 las capacidades heredadas y las limitaciones que requieren decisiones o
 configuración de la aplicación.
 
@@ -677,11 +677,14 @@ La asignación usa los `$fillable` generados estructuralmente para los modelos;
 el generador no inspecciona tipos de columna, claves foráneas ni índices para
 crear reglas de entrada. Las restricciones del esquema se mantienen en la
 base de datos. No agrega filtros, paginación, autenticación ni autorización.
-Para una relación N:M, ambos controladores CRUD incluyen acciones anidadas para
-agregar y quitar un registro relacionado mediante `syncWithoutDetaching()` y
-`detach()`. Las rutas se registran como POST y DELETE en `routes/api.php`.
-Si el controlador ya existe y no es idéntico al generado por LRG (o a su
-versión CRUD simple anterior), lo conserva y rechaza la operación.
+Para una relación N:M, el controlador del primer modelo acepta `related_ids`
+como una lista de IDs existentes al crear o actualizar. En actualizaciones,
+omitir el campo conserva las asignaciones; enviarlo reemplaza la lista y `[]`
+la vacía. También agrega una única ruta `PUT` en ese controlador para reemplazar
+la relación directamente. El controlador del segundo modelo no recibe rutas
+duplicadas de asociación. Si un controlador ya existe y no es idéntico al
+generado por LRG (o a una versión generada anterior reconocida), lo conserva y
+rechaza la operación.
 
 Con `--api`, `ApiRouteGenerator` registra cada entidad solicitada mediante
 `Route::apiResource()`. Los recursos usan snake_case plural (`users`,
@@ -723,9 +726,10 @@ php tests/full_generation_integration.php <ruta-a-vendor/autoload.php>
 
 La integración crea una aplicación temporal con migraciones SQLite, ejecuta
 `relation:make` dos veces para las tres cardinalidades, comprueba los métodos
-Eloquent, `php artisan route:list`, operaciones CRUD HTTP, asignación y
-desasignación N:M, migración de rutas API a `routes/api.php`, actualizaciones
-parciales, preservación de rutas web, el conflicto con un controlador manual,
+Eloquent, `php artisan route:list`, operaciones CRUD HTTP, asignación N:M
+mediante el campo `related_ids` en altas/actualizaciones y su ruta `PUT`,
+migración de rutas API a `routes/api.php`, actualizaciones parciales,
+preservación de rutas web, el conflicto con un controlador manual,
 el rechazo de una migración ambigua y una falla controlada después de una
 escritura parcial; verifica que los archivos generados y el índice se
 recuperen. `tests/run.php` también inyecta un fallo de escritura para probar
