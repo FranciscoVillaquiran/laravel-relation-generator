@@ -4,16 +4,25 @@ Este documento describe la arquitectura actual de LRG `v3.2.0`, incluyendo
 las capacidades heredadas y las limitaciones que requieren decisiones o
 configuración de la aplicación.
 
+La arquitectura prevista del adaptador React y sus contratos versionados se
+describen en [el contrato del adaptador React](REACT_ADAPTER_CONTRACT.md).
+Existe una [demostración independiente de la plantilla React](../templates/react/README.md);
+el comando `lrg:frontend:template` instala esa plantilla en un frontend
+existente compatible. `lrg:frontend:connect` configura el proxy de desarrollo y
+sincroniza los metadatos de un backend preparado.
+
 ## 1. Qué es el proyecto
 
-Laravel Relation Generator es una biblioteca PHP para Laravel que registra un
-comando Artisan:
+Laravel Relation Generator es una biblioteca PHP para Laravel que registra
+estos comandos Artisan:
 
 ```text
 relation:make
+lrg:frontend:template
+lrg:frontend:connect
 ```
 
-El comando conecta dos modelos Eloquent según las migraciones existentes.
+`relation:make` conecta dos modelos Eloquent según las migraciones existentes.
 Puede:
 
 1. Añadir métodos de relación a los modelos.
@@ -31,7 +40,8 @@ existentes en la aplicación Laravel.
 
 ```text
 src/
-├── Console/Commands/RelationMakeCommand.php
+├── Console/Commands/{RelationMakeCommand,FrontendTemplateCommand,FrontendConnectCommand}.php
+├── Frontend/{TemplateInstaller,FrontendConnector,MetadataGenerator}.php
 ├── Generators/
 │   ├── CrudGenerator.php
 │   ├── FileChangeTransaction.php
@@ -52,7 +62,12 @@ src/
 
 | Archivo | Responsabilidad |
 |---|---|
-| `RelationGeneratorServiceProvider.php` | Registra el comando cuando Laravel se ejecuta en consola. |
+| `RelationGeneratorServiceProvider.php` | Registra los comandos cuando Laravel se ejecuta en consola. |
+| `Console/Commands/FrontendTemplateCommand.php` | Previsualiza y confirma la instalación de la plantilla React en un proyecto hermano. |
+| `Console/Commands/FrontendConnectCommand.php` | Comprueba y sincroniza la conexión frontend con el backend preparado. |
+| `Frontend/TemplateInstaller.php` | Valida el proyecto y sus archivos, instala la plantilla y recupera instalaciones interrumpidas. |
+| `Frontend/FrontendConnector.php` | Valida la instalación, publica el contrato y configura el proxy Vite. |
+| `Frontend/MetadataGenerator.php` | Construye metadatos deterministas a partir del esquema y las rutas verificadas. |
 | `Console/Commands/RelationMakeCommand.php` | Valida argumentos/opciones, prepara los cambios, coordina los generadores y confirma el índice. |
 | `Relations/RelationDefinition.php` | Transporta los modelos, la cardinalidad y los nombres opcionales de tabla. |
 | `Generators/RelationshipGenerator.php` | Calcula los nombres de las relaciones y añade sus métodos a los modelos. |
@@ -77,7 +92,8 @@ sensibles a mayúsculas.
 service provider en `extra.laravel.providers`. Laravel puede descubrir el
 provider mediante el descubrimiento de paquetes de Composer. El provider no
 registra servicios en `register()`; en `boot()` comprueba
-`$this->app->runningInConsole()` y registra `RelationMakeCommand`.
+`$this->app->runningInConsole()` y registra `RelationMakeCommand`,
+`FrontendTemplateCommand` y `FrontendConnectCommand`.
 
 Requisitos declarados:
 
@@ -152,8 +168,8 @@ controladores heredados; `todo` conserva su significado anterior y no activa
 CRUD.
 
 `--crud` necesita modelos en `app/Models` compatibles con Eloquent, tablas y
-claves primarias simples. `--api` requiere un archivo `routes/api.php`
-registrado en la configuración Laravel admitida y no ambigua. El comando no
+claves primarias simples. `--api` prepara `routes/api.php` y su registro cuando
+la configuración Laravel es reconocible y no ambigua. El comando no
 solicita tablas ni cardinalidades adicionales: obtiene esa información de las
 migraciones o falla si no puede resolverla.
 
@@ -601,8 +617,8 @@ DatabaseSchema::toArray(): array{tables: array, relations: list<array>, migratio
 Los consumidores pueden usar `DatabaseSchema` o su serialización normalizada.
 El analizador no ejecuta CRUD ni migraciones; el generador CRUD consume los
 metadatos existentes y no crea un CRUD independiente para tablas pivote. Para
-relaciones N:M con `--crud --api`, genera endpoints de asociación en ambos
-modelos relacionados.
+relaciones N:M con `--crud --api`, genera el endpoint de asociación para el
+primer modelo indicado, cuando la relación es compatible.
 
 ## 15. Generación estructural de relaciones y `$fillable` (tercer incremento LRG 2.0)
 
@@ -697,15 +713,49 @@ El generador administra un bloque delimitado por marcadores en `routes/api.php`
 y conserva las rutas manuales fuera de ese bloque. Al migrar desde versiones
 anteriores, mueve las rutas manuales que estaban fuera del bloque antiguo y
 las rutas CRUD administradas desde `routes/lrg_api.php`; después elimina ese
-archivo obsoleto. No modifica `routes/web.php`. El archivo API debe existir y
-estar registrado en Laravel.
+archivo obsoleto. No modifica `routes/web.php`. Si falta `routes/api.php`, lo
+crea; la migración del archivo antiguo y la preparación son transaccionales.
 
-Antes de escribir comprueba la carga de `routes/api.php` mediante la
-configuración estática `withRouting(api: ...)` de Laravel 11+ o el grupo API
-convencional (`middleware('api')`, `prefix('api')`) del `RouteServiceProvider`
-de Laravel 10. `withRouting(using: ...)` y otras configuraciones no
-verificables se rechazan. Comprueba también el namespace, clase y métodos
-públicos CRUD y de asociación de los controladores planificados.
+En Laravel 11+ reconoce la cadena convencional `return
+Application::configure(...)->withRouting(...)` con argumentos nombrados y
+agrega `api: __DIR__ . '/../routes/api.php'` si falta, preservando `apiPrefix`
+y los demás argumentos. Reconoce también el grupo API convencional de
+Laravel 10 en `RouteServiceProvider` con prefijo literal; si la única
+configuración de rutas es un callback convencional que contiene exclusivamente
+el grupo web, agrega el grupo API predeterminado. No registra providers
+ausentes. `withRouting(using: ...)`, rutas API
+dinámicas, argumentos posicionales y configuraciones que no puede reconocer se
+rechazan; requieren intervención manual. No instala Sanctum.
+
+Comprueba namespace, clase y métodos públicos. Si un controlador válido solo
+implementa parte del CRUD, declara únicamente las acciones públicas disponibles
+mediante `apiResource()->only(...)`; una asociación requiere su método real.
+Después de aplicar los cambios y antes del commit de la transacción, ejecuta
+`artisan route:list --json` en un proceso Laravel nuevo y verifica los métodos,
+URIs y controladores de cada ruta administrada. Si la caché impide verlas,
+restaura los archivos y solicita ejecutar `php artisan route:clear` antes de
+reintentar. Esto no comprueba disponibilidad por HTTP ni garantiza que un
+servidor esté funcionando.
+
+Para el Incremento 05, `RegisteredApiRouteInspector::inspect($projectRoot)`
+devuelve un inventario sin persistir derivado del bloque LRG y de las rutas
+efectivamente cargadas por Laravel:
+
+- `api_prefix`: prefijo efectivo sin barras inicial o final (`api`, `v1` o
+  `""`). Para `lrg.frontend.metadata` 1.0 debe convertirse a `"/api"`,
+  `"/v1"` o `""`, respectivamente.
+- `entities`: lista con `model`, `resource` y `operations`; estas últimas se
+  indexan por `index`, `store`, `show`, `update` y `destroy` disponibles.
+- Cada operación y entrada de `associations` contiene `methods` (incluye
+  `HEAD` y `PATCH` cuando Laravel los registra), `uri` completa sin `/`
+  inicial, `parameters`, `name`, `action` (`Clase@metodo`) y `domain`
+  (`null` cuando no se restringe). Las asociaciones son únicamente las
+  declaradas e implementadas; el consumidor no debe inferir otras.
+
+El inventario no es por sí mismo el contrato frontend: `MetadataGenerator`
+convierte las URI a rutas relativas al prefijo y las combina con el esquema
+y las relaciones verificadas. Errores de arranque, registro ausente, prefijos
+inconsistentes o resultados ambiguos se informan explícitamente.
 
 Detecta llamadas estáticas de rutas manuales con URI solapada, nombres
 convencionales en uso, importaciones `Route` incompatibles y bloques

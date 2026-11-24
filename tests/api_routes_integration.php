@@ -1,6 +1,7 @@
 <?php
 
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\ApiRouteGenerator;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\RegisteredApiRouteInspector;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Http\Request;
 use Symfony\Component\Process\Process;
@@ -12,6 +13,8 @@ if (!isset($argv[1]) || !is_file($argv[1])) {
 $loader = require $argv[1];
 $root = dirname(__DIR__);
 require_once $root . '/src/Generators/ApiRouteGenerator.php';
+require_once $root . '/src/Generators/FileChangeTransaction.php';
+require_once $root . '/src/Generators/RegisteredApiRouteInspector.php';
 
 $projectRoot = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'lrg-api-integration-' . bin2hex(random_bytes(6));
 $routesPath = $projectRoot . DIRECTORY_SEPARATOR . 'routes';
@@ -40,6 +43,7 @@ class %sController
     public function show(string $id) { return response()->json(['action' => 'show', 'id' => $id]); }
     public function update(Request $request, string $id) { return response()->json(['action' => 'update', 'id' => $id]); }
     public function destroy(string $id) { return response()->json(null, 204); }
+    public function syncBlogPost(string $id) { return response()->json(['action' => 'sync', 'id' => $id]); }
 }
 PHP;
 
@@ -67,7 +71,7 @@ try {
 use Illuminate\Foundation\Application;
 
 return Application::configure(basePath: dirname(__DIR__))
-    ->withRouting(api: __DIR__ . '/../routes/api.php')
+    ->withRouting(apiPrefix: 'v2')
     ->withMiddleware()
     ->withExceptions()
     ->create();
@@ -79,20 +83,46 @@ PHP
     );
 
     foreach ($models as $model) {
+        $controller = sprintf($controllerTemplate, $model);
+        if ($model === 'BlogPost') {
+            $controller = str_replace('public function destroy(', 'private function destroy(', $controller);
+        }
         file_put_contents(
             $appPath . DIRECTORY_SEPARATOR . $model . 'Controller.php',
-            sprintf($controllerTemplate, $model)
+            $controller
         );
     }
 
-    (new ApiRouteGenerator())->generate(
+    $generator = new ApiRouteGenerator();
+    $associations = [[
+        'parentModelClass' => 'App\\Models\\User',
+        'relatedModelClass' => 'App\\Models\\BlogPost',
+        'relation' => 'blogPosts',
+    ]];
+    $generator->generate(
         $projectRoot,
-        ['App\\Models\\User', 'App\\Models\\BlogPost']
+        ['App\\Models\\User', 'App\\Models\\BlogPost'],
+        $associations
     );
+    $bootstrapBeforeRepeat = file_get_contents($bootstrapPath . DIRECTORY_SEPARATOR . 'app.php');
+    $apiBeforeRepeat = file_get_contents($routesPath . DIRECTORY_SEPARATOR . 'api.php');
+    $generator->generate($projectRoot, ['App\\Models\\User', 'App\\Models\\BlogPost'], $associations);
+    if (file_get_contents($bootstrapPath . DIRECTORY_SEPARATOR . 'app.php') !== $bootstrapBeforeRepeat
+        || file_get_contents($routesPath . DIRECTORY_SEPARATOR . 'api.php') !== $apiBeforeRepeat) {
+        throw new RuntimeException('Repeating route generation changed the prepared application.');
+    }
+    $inspection = (new RegisteredApiRouteInspector())->inspect($projectRoot);
+    if ($inspection['api_prefix'] !== 'v2'
+        || $inspection['entities'][0]['operations']['show']['parameters'] !== ['user']
+        || isset($inspection['entities'][1]['operations']['destroy'])
+        || $inspection['associations'][0]['uri'] !== 'v2/users/{user}/blog_posts'
+        || $inspection['associations'][0]['methods'] !== ['PUT']) {
+        throw new RuntimeException('Unexpected registered route inventory: ' . var_export($inspection, true));
+    }
     $loader->addPsr4('App\\', $projectRoot . DIRECTORY_SEPARATOR . 'app');
 
     $process = new Process(
-        [PHP_BINARY, $projectRoot . DIRECTORY_SEPARATOR . 'artisan', 'route:list', '--path=api'],
+        [PHP_BINARY, $projectRoot . DIRECTORY_SEPARATOR . 'artisan', 'route:list', '--path=v2'],
         $projectRoot
     );
     $process->run();
@@ -110,10 +140,12 @@ PHP
         'POST',
         'PUT|PATCH',
         'DELETE',
-        'api/users',
-        'api/users/{user}',
-        'api/blog_posts',
-        'api/blog_posts/{blog_post}',
+        'v2/users',
+        'v2/users/{user}',
+        'v2/blog_posts',
+        'v2/blog_posts/{blog_post}',
+        'v2/health',
+        'v2/users/{user}/blog_posts',
         'UserController@index',
         'UserController@store',
         'UserController@show',
@@ -127,12 +159,13 @@ PHP
 
     $httpKernel = $app->make(HttpKernel::class);
     $responses = [
-        ['GET', '/api/users', 200, 'index'],
-        ['POST', '/api/users', 201, 'store'],
-        ['GET', '/api/users/42', 200, 'show'],
-        ['PATCH', '/api/users/42', 200, 'update'],
-        ['DELETE', '/api/users/42', 204, null],
-        ['GET', '/api/blog_posts/9', 200, 'show'],
+        ['GET', '/v2/users', 200, 'index'],
+        ['POST', '/v2/users', 201, 'store'],
+        ['GET', '/v2/users/42', 200, 'show'],
+        ['PATCH', '/v2/users/42', 200, 'update'],
+        ['DELETE', '/v2/users/42', 204, null],
+        ['GET', '/v2/blog_posts/9', 200, 'show'],
+        ['PUT', '/v2/users/42/blog_posts', 200, 'sync'],
     ];
     foreach ($responses as [$method, $uri, $expectedStatus, $expectedAction]) {
         $response = $httpKernel->handle(Request::create($uri, $method));

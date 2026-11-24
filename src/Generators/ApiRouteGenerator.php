@@ -4,6 +4,7 @@ namespace Franciscovillaquiran\LaravelRelationGenerator\Generators;
 
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 class ApiRouteGenerator
 {
@@ -27,14 +28,8 @@ class ApiRouteGenerator
             . DIRECTORY_SEPARATOR . 'Http' . DIRECTORY_SEPARATOR . 'Controllers'
             . DIRECTORY_SEPARATOR . 'Api';
 
-        if (!is_file($apiRoutesPath)) {
-            throw new RuntimeException(
-                "API routes are not enabled: expected {$apiRoutesPath}. Enable/register Laravel API routes before generating CRUD routes."
-            );
-        }
-
-        $this->assertApiRoutesRegistered($projectRoot, $apiRoutesPath);
-        $apiSource = $this->readPhpFile($apiRoutesPath);
+        $registrationChanges = $this->prepareApiRegistration($projectRoot, $apiRoutesPath);
+        $apiSource = is_file($apiRoutesPath) ? $this->readPhpFile($apiRoutesPath) : "<?php\n";
         $legacySource = is_file($managedRoutesPath)
             ? $this->readPhpFile($managedRoutesPath)
             : null;
@@ -62,14 +57,15 @@ class ApiRouteGenerator
             $requiredActions[$association['controller']][] = $association['action'];
         }
 
-        foreach ($models as $model) {
+        foreach ($models as &$model) {
             $controllerPath = $controllersDirectory . DIRECTORY_SEPARATOR . $model['controller'] . '.php';
-            $this->assertControllerActions(
+            $model['operations'] = $this->controllerActions(
                 $controllerPath,
                 $model['controller'],
                 array_values(array_unique($requiredActions[$model['controller']] ?? []))
             );
         }
+        unset($model);
 
         [$apiUpdated, $legacyIncluded] = $this->removeLegacyInclude(
             $apiSource,
@@ -91,7 +87,7 @@ class ApiRouteGenerator
         $apiUpdated = $this->ensureRouteImport($apiUpdated, $apiRoutesPath);
         $resourceCalls = [];
         foreach ($models as $model) {
-            $resourceCalls[$model['resource']] = $model['controller'];
+            $resourceCalls[$model['resource']] = $model;
         }
 
         $this->assertNoRouteConflicts($apiUpdated, $apiRoutesPath, $resourceCalls);
@@ -103,10 +99,37 @@ class ApiRouteGenerator
         );
         $this->assertPhpSyntax($apiUpdated, $apiRoutesPath);
 
-        $this->writeAtomically($apiRoutesPath, $apiUpdated);
-        if ($legacyIncluded && $legacySource !== null && !@unlink($managedRoutesPath)) {
-            throw new RuntimeException("Could not remove obsolete API routes file: {$managedRoutesPath}");
+        $changes = $registrationChanges;
+        $changes[$apiRoutesPath] = $apiUpdated;
+        if ($legacyIncluded && $legacySource !== null) {
+            $changes[$managedRoutesPath] = null;
         }
+        $transaction = new FileChangeTransaction();
+        try {
+            $transaction->apply($changes);
+            $transaction->commit();
+        } catch (Throwable $exception) {
+            if (!$transaction->isCommitted()) {
+                $transaction->rollback();
+            }
+            throw $exception;
+        }
+    }
+
+    /**
+     * Read declared routes without claiming that Laravel loaded them.
+     *
+     * @return array{resources: array, associations: array}
+     */
+    public function declarations(string $projectRoot): array
+    {
+        $path = rtrim($projectRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'routes'
+            . DIRECTORY_SEPARATOR . 'api.php';
+        $source = $this->readPhpFile($path);
+        return [
+            'resources' => $this->managedModels($source, $path),
+            'associations' => $this->managedAssociationRoutes($source, $path),
+        ];
     }
 
     /**
@@ -163,7 +186,7 @@ class ApiRouteGenerator
                 continue;
             }
             if (!preg_match(
-                '/^\s*Route::apiResource\([\'"]([A-Za-z0-9_-]+)[\'"],\s*\\\\App\\\\Http\\\\Controllers\\\\Api\\\\([A-Za-z_][A-Za-z0-9_]*)::class\);\s*$/',
+                '/^\s*Route::apiResource\([\'"]([A-Za-z0-9_-]+)[\'"],\s*\\\\App\\\\Http\\\\Controllers\\\\Api\\\\([A-Za-z_][A-Za-z0-9_]*)::class\)(?:->only\(\[((?:[\'"](?:index|store|show|update|destroy)[\'"](?:,\s*)?)+)\]\))?;\s*$/',
                 $line,
                 $matches
             ) || !str_ends_with($matches[2], 'Controller')) {
@@ -182,6 +205,9 @@ class ApiRouteGenerator
                 'class' => 'App\\Models\\' . substr($controller, 0, -strlen('Controller')),
                 'controller' => $controller,
                 'resource' => $resource,
+                'operations' => isset($matches[3]) && $matches[3] !== ''
+                    ? array_map(static fn (string $operation): string => trim($operation, " \t\n\r\0\x0B'\""), explode(',', $matches[3]))
+                    : ['index', 'store', 'show', 'update', 'destroy'],
             ];
         }
 
@@ -376,7 +402,8 @@ class ApiRouteGenerator
         return array_values($models);
     }
 
-    private function assertApiRoutesRegistered(string $projectRoot, string $apiRoutesPath): void
+    /** @return array<string, string> */
+    private function prepareApiRegistration(string $projectRoot, string $apiRoutesPath): array
     {
         $bootstrapPath = $projectRoot . DIRECTORY_SEPARATOR . 'bootstrap'
             . DIRECTORY_SEPARATOR . 'app.php';
@@ -384,20 +411,45 @@ class ApiRouteGenerator
             . DIRECTORY_SEPARATOR . 'Providers' . DIRECTORY_SEPARATOR . 'RouteServiceProvider.php';
 
         if (is_file($bootstrapPath)) {
-            $source = $this->codeWithoutComments($this->readPhpFile($bootstrapPath));
-            if ($this->hasLaravel11ApiRouteRegistration($source)) {
-                return;
+            $source = $this->readPhpFile($bootstrapPath);
+            if (str_contains($this->codeWithoutComments($source), 'withRouting')) {
+                $updated = $this->prepareLaravelBuilderRouting($source, $bootstrapPath);
+                return $updated === $source ? [] : [$bootstrapPath => $updated];
             }
         }
 
         if (is_file($providerPath)) {
-            $source = $this->codeWithoutComments($this->readPhpFile($providerPath));
-            if (
-                preg_match('/routes[\\\\\/]+api\.php/i', $source) === 1
-                && preg_match('/middleware\s*\(\s*[\'"]api[\'"]\s*\)/i', $source) === 1
-                && preg_match('/prefix\s*\(\s*[\'"]api[\'"]\s*\)/i', $source) === 1
-            ) {
-                return;
+            $providerSource = $this->readPhpFile($providerPath);
+            $source = $this->codeWithoutComments($providerSource);
+            if (preg_match_all(
+                '~\bRoute\s*::\s*middleware\s*\(\s*[\'"]api[\'"]\s*\)\s*'
+                . '->\s*prefix\s*\(\s*[\'"][^\'"]*[\'"]\s*\)\s*'
+                . '->\s*group\s*\(\s*base_path\s*\(\s*[\'"]routes/api\.php[\'"]\s*\)\s*\)~i',
+                $source
+            ) === 1) {
+                return [];
+            }
+            if (preg_match('/routes[\\\\\/]+api\.php|lrg_api\.php/i', $source) !== 1
+                && preg_match_all('/\$this\s*->\s*routes\s*\(/', $source) === 1
+                && preg_match('/\buse\s+Illuminate\\\\Support\\\\Facades\\\\Route\s*;/', $source) === 1
+                && preg_match_all(
+                    '~\$this\s*->\s*routes\s*\(\s*function\s*\(\s*\)\s*\{\s*'
+                    . '(Route\s*::\s*middleware\s*\(\s*[\'"]web[\'"]\s*\)\s*'
+                    . '->\s*group\s*\(\s*base_path\s*\(\s*[\'"]routes/web\.php[\'"]\s*\)\s*\)\s*;)'
+                    . '\s*\}\s*\)\s*;~',
+                    $providerSource,
+                    $webGroup,
+                    PREG_OFFSET_CAPTURE
+                ) === 1) {
+                $insertAt = $webGroup[1][0][1];
+                $updated = substr_replace(
+                    $providerSource,
+                    "Route::middleware('api')->prefix('api')->group(base_path('routes/api.php'));\n\n            ",
+                    $insertAt,
+                    0
+                );
+                $this->assertPhpSyntax($updated, $providerPath);
+                return [$providerPath => $updated];
             }
         }
 
@@ -407,32 +459,115 @@ class ApiRouteGenerator
         );
     }
 
-    private function hasLaravel11ApiRouteRegistration(string $source): bool
+    private function prepareLaravelBuilderRouting(string $source, string $path): string
     {
-        if (
-            preg_match_all('/withRouting\s*\(/', $source) !== 1
-            || !preg_match(
-                '/withRouting\s*\(\s*(api|web|pages|commands|channels|health|apiPrefix|then)\s*:/i',
-                $source
-            )
-            || preg_match('/withRouting\s*\(\s*using\s*:/i', $source) === 1
-            || !preg_match('/withRouting\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/', $source, $firstArgument)
-            || strtolower($firstArgument[1]) === 'using'
-        ) {
-            return false;
+        $tokens = token_get_all($source, TOKEN_PARSE);
+        $offsets = [];
+        $offset = 0;
+        $matches = [];
+        $braceDepth = 0;
+        foreach ($tokens as $index => $token) {
+            $offsets[$index] = $offset;
+            $text = is_array($token) ? $token[1] : $token;
+            $offset += strlen($text);
+            if (is_array($token) && $token[0] === T_STRING && $text === 'withRouting') {
+                $matches[] = [$index, $braceDepth];
+            }
+            if ($text === '{') {
+                $braceDepth++;
+            } elseif ($text === '}') {
+                $braceDepth--;
+            }
         }
-
-        return preg_match(
-            '/\bapi\s*:\s*(?:(?:__DIR__|base_path\s*\([^)]*\))\s*\.\s*)?[\'"][^\'"]*routes[\\\\\/]+api\.php[\'"]/i',
-            $source
-        ) === 1;
+        $fail = static function () use ($path): never {
+            throw new RuntimeException("Could not verify or safely prepare API routing in {$path}: unsupported or ambiguous withRouting configuration.");
+        };
+        if (count($matches) !== 1 || $matches[0][1] !== 0) {
+            $fail();
+        }
+        $method = $matches[0][0];
+        $prefix = $this->codeWithoutComments(substr($source, 0, $offsets[$method]));
+        if (preg_match('/\breturn\s+(?:\\\\?Illuminate\\\\Foundation\\\\)?Application\s*::\s*configure\s*\([^;]*\)\s*->\s*$/s', $prefix) !== 1) {
+            $fail();
+        }
+        $open = $this->nextSignificantToken($tokens, $method + 1);
+        if ($open === null || $tokens[$open] !== '(') {
+            $fail();
+        }
+        $depth = 1;
+        $segments = [];
+        $start = $open + 1;
+        $close = null;
+        for ($i = $start; $i < count($tokens); $i++) {
+            $token = $tokens[$i];
+            if (is_array($token)) {
+                if (in_array($token[0], [T_CURLY_OPEN, T_DOLLAR_OPEN_CURLY_BRACES], true)) {
+                    $fail();
+                }
+                continue;
+            }
+            if (in_array($token, ['(', '[', '{'], true)) {
+                $depth++;
+            } elseif (in_array($token, [')', ']', '}'], true)) {
+                $depth--;
+                if ($depth === 0) {
+                    if ($token !== ')') {
+                        $fail();
+                    }
+                    $segments[] = [$start, $i];
+                    $close = $i;
+                    break;
+                }
+            } elseif ($token === ',' && $depth === 1) {
+                $segments[] = [$start, $i];
+                $start = $i + 1;
+            }
+        }
+        if ($close === null) {
+            $fail();
+        }
+        $arguments = [];
+        foreach ($segments as [$from, $to]) {
+            $segment = substr($source, $offsets[$from], $offsets[$to] - $offsets[$from]);
+            $segment = trim($this->codeWithoutComments("<?php " . $segment));
+            $segment = trim(substr($segment, 5));
+            if ($segment === '') {
+                continue;
+            }
+            if (preg_match('/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/s', $segment, $argument) !== 1
+                || isset($arguments[$argument[1]])) {
+                $fail();
+            }
+            $arguments[$argument[1]] = trim($argument[2]);
+        }
+        if (isset($arguments['using'])) {
+            $fail();
+        }
+        $apiPathMentions = substr_count($this->codeWithoutComments($source), 'routes/api.php');
+        if (isset($arguments['api'])) {
+            if ($apiPathMentions !== 1
+                || preg_match('~^(?:__DIR__\s*\.\s*[\'"]/\.\./routes/api\.php[\'"]|base_path\s*\(\s*[\'"]routes/api\.php[\'"]\s*\))$~', $arguments['api']) !== 1) {
+                $fail();
+            }
+            return $source;
+        }
+        if ($apiPathMentions !== 0) {
+            $fail();
+        }
+        $beforeClose = substr($source, $offsets[$open] + 1, $offsets[$close] - $offsets[$open] - 1);
+        $significant = trim($this->codeWithoutComments("<?php " . $beforeClose));
+        $significant = trim(substr($significant, 5));
+        $separator = $significant === '' || str_ends_with($significant, ',') ? '' : ',';
+        $updated = substr_replace($source, $separator . "\n        api: __DIR__ . '/../routes/api.php',\n    ", $offsets[$close], 0);
+        $this->assertPhpSyntax($updated, $path);
+        return $updated;
     }
 
-    private function assertControllerActions(
+    private function controllerActions(
         string $controllerPath,
         string $controllerName,
         array $additionalActions = []
-    ): void
+    ): array
     {
         if (!is_file($controllerPath)) {
             throw new RuntimeException("CRUD controller not found: {$controllerPath}");
@@ -537,15 +672,20 @@ class ApiRouteGenerator
             }
         }
 
-        $missing = array_values(array_diff(
-            array_merge(['index', 'store', 'show', 'update', 'destroy'], $additionalActions),
-            array_keys($methods)
-        ));
+        $missing = array_values(array_diff($additionalActions, array_keys($methods)));
         if ($missing !== []) {
             throw new RuntimeException(
                 "CRUD controller {$controllerPath} is missing public actions: " . implode(', ', $missing)
             );
         }
+        $operations = array_values(array_intersect(
+            ['index', 'store', 'show', 'update', 'destroy'],
+            array_keys($methods)
+        ));
+        if ($operations === []) {
+            throw new RuntimeException("CRUD controller {$controllerPath} has no supported public CRUD actions.");
+        }
+        return $operations;
     }
 
     private function isPublicMethod(array $tokens, int $functionIndex): bool
@@ -575,7 +715,14 @@ class ApiRouteGenerator
     {
         $lines = [self::BEGIN_MARKER];
         foreach ($models as $model) {
-            $lines[] = "Route::apiResource('{$model['resource']}', \\App\\Http\\Controllers\\Api\\{$model['controller']}::class);";
+            $call = "Route::apiResource('{$model['resource']}', \\App\\Http\\Controllers\\Api\\{$model['controller']}::class)";
+            if ($model['operations'] !== ['index', 'store', 'show', 'update', 'destroy']) {
+                $call .= '->only([' . implode(', ', array_map(
+                    static fn (string $operation): string => "'{$operation}'",
+                    $model['operations']
+                )) . '])';
+            }
+            $lines[] = $call . ';';
         }
         foreach ($associationRoutes as $route) {
             $lines[] = $route['line'];
@@ -872,20 +1019,21 @@ class ApiRouteGenerator
             $methods = $method === 'match'
                 ? $this->matchRouteMethods($arguments[0] ?? [])
                 : [];
-            foreach ($resources as $resource => $controller) {
-                if (!$this->routeCallConflicts($method, $uri, $resource, $methods)) {
+            foreach ($resources as $resource => $model) {
+                if (!$this->routeCallConflicts($method, $uri, $resource, $methods, $model['operations'])) {
                     continue;
                 }
 
                 throw new RuntimeException(
-                    "Route conflict in {$path}: an existing {$method} route can overlap API resource '{$resource}' ({$controller})."
+                    "Route conflict in {$path}: an existing {$method} route can overlap API resource '{$resource}' ({$model['controller']})."
                 );
             }
         }
 
-        foreach ($resources as $resource => $_controller) {
+        foreach ($resources as $resource => $model) {
+            $operationPattern = implode('|', $model['operations']);
             if (preg_match(
-                '/[\'"]' . preg_quote($resource, '/') . '\.(?:index|store|show|update|destroy)[\'"]/i',
+                '/[\'"]' . preg_quote($resource, '/') . '\.(?:' . $operationPattern . ')[\'"]/i',
                 $code
             ) === 1) {
                 throw new RuntimeException(
@@ -1014,7 +1162,8 @@ class ApiRouteGenerator
         string $method,
         string $uri,
         string $resource,
-        array $matchedMethods = []
+        array $matchedMethods,
+        array $operations
     ): bool
     {
         $uri = trim($uri, '/');
@@ -1043,25 +1192,30 @@ class ApiRouteGenerator
                 && str_ends_with($parameter, '}');
         }
 
-        if (in_array($method, ['apiResource', 'resource'], true)) {
+        if (in_array($method, ['apiresource', 'resource'], true)) {
             return $collectionRoute || $memberRoute;
         }
+        $expectedMethods = [];
+        foreach ([
+            'index' => ['GET', 'HEAD'],
+            'store' => ['POST'],
+            'show' => ['GET', 'HEAD'],
+            'update' => ['PUT', 'PATCH'],
+            'destroy' => ['DELETE'],
+        ] as $operation => $verbs) {
+            if (in_array($operation, $operations, true)
+                && (($collectionRoute && in_array($operation, ['index', 'store'], true))
+                    || ($memberRoute && in_array($operation, ['show', 'update', 'destroy'], true)))) {
+                $expectedMethods = array_merge($expectedMethods, $verbs);
+            }
+        }
         if ($method === 'match' || $method === 'any') {
-            $expectedMethods = $collectionRoute
-                ? ['GET', 'HEAD', 'POST']
-                : ($memberRoute ? ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE'] : []);
             $methods = $method === 'any'
                 ? ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']
                 : $matchedMethods;
             return array_intersect($expectedMethods, $methods) !== [];
         }
-        if ($collectionRoute) {
-            return in_array(strtoupper($method), ['GET', 'HEAD', 'POST'], true);
-        }
-        if ($memberRoute) {
-            return in_array(strtoupper($method), ['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE'], true);
-        }
-        return false;
+        return in_array(strtoupper($method), $expectedMethods, true);
     }
 
     private function splitCallArguments(array $tokens, int $openParenthesis): array
@@ -1186,7 +1340,7 @@ class ApiRouteGenerator
     private function codeWithoutComments(string $source): string
     {
         $code = '';
-        foreach (token_get_all($source, TOKEN_PARSE) as $token) {
+        foreach (token_get_all($source) as $token) {
             if (is_array($token) && in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)) {
                 continue;
             }
@@ -1216,30 +1370,4 @@ class ApiRouteGenerator
         return $quote === "'" ? str_replace(["\\\\", "\\'"], ["\\", "'"], $contents) : stripcslashes($contents);
     }
 
-    private function writeAtomically(string $path, string $contents): void
-    {
-        $directory = dirname($path);
-        $temporaryPath = tempnam($directory, '.lrg-routes-');
-        if ($temporaryPath === false) {
-            throw new RuntimeException("Could not create temporary route file in {$directory}.");
-        }
-
-        try {
-            $permissions = is_file($path) ? fileperms($path) : false;
-            $permissions = $permissions === false ? 0644 : ($permissions & 0777);
-            if (!chmod($temporaryPath, $permissions)) {
-                throw new RuntimeException("Could not set permissions for generated route file: {$path}");
-            }
-            if (file_put_contents($temporaryPath, $contents, LOCK_EX) !== strlen($contents)) {
-                throw new RuntimeException("Could not write generated route file: {$path}");
-            }
-            if (!rename($temporaryPath, $path)) {
-                throw new RuntimeException("Could not install generated route file: {$path}");
-            }
-        } finally {
-            if (is_file($temporaryPath)) {
-                unlink($temporaryPath);
-            }
-        }
-    }
 }

@@ -9,6 +9,39 @@ use RuntimeException;
 
 class CrudGenerator
 {
+    /**
+     * Verify the controller against the same source templates used to generate it.
+     *
+     * @param list<array{relatedModelClass: string, relation: string}> $possibleAssociations
+     * @return list<array{relatedModelClass: string, relation: string}>
+     */
+    public function inspectGeneratedController(
+        string $projectRoot,
+        string $modelClass,
+        SchemaTable $table,
+        array $possibleAssociations
+    ): array {
+        $name = $this->modelBasename($modelClass);
+        $path = rtrim($projectRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'app'
+            . DIRECTORY_SEPARATOR . 'Http' . DIRECTORY_SEPARATOR . 'Controllers'
+            . DIRECTORY_SEPARATOR . 'Api' . DIRECTORY_SEPARATOR . $name . 'Controller.php';
+        $source = @file_get_contents($path);
+        if ($source === false) {
+            throw new RuntimeException("CRUD controller for {$modelClass} is missing or unreadable: {$path}");
+        }
+        $timestamps = isset($table->columns['created_at'], $table->columns['updated_at']);
+        $variants = [[]];
+        foreach ($possibleAssociations as $association) {
+            $variants[] = [$association];
+        }
+        foreach ($variants as $associations) {
+            if ($source === $this->controllerSource($modelClass, $name, $associations, $timestamps)) {
+                return $associations;
+            }
+        }
+        throw new RuntimeException("CRUD controller for {$modelClass} is not an unchanged supported LRG-generated controller: {$path}");
+    }
+
     public function generateFromTable(
         string $projectRoot,
         string $modelClass,

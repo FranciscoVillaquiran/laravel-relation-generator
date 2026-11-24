@@ -4,6 +4,8 @@ namespace Franciscovillaquiran\LaravelRelationGenerator;
 
 use Illuminate\Support\ServiceProvider;
 use Franciscovillaquiran\LaravelRelationGenerator\Console\Commands\RelationMakeCommand;
+use Franciscovillaquiran\LaravelRelationGenerator\Console\Commands\FrontendTemplateCommand;
+use Franciscovillaquiran\LaravelRelationGenerator\Console\Commands\FrontendConnectCommand;
 
 class RelationGeneratorServiceProvider extends ServiceProvider
 {
@@ -23,6 +25,8 @@ class RelationGeneratorServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 RelationMakeCommand::class,
+                FrontendTemplateCommand::class,
+                FrontendConnectCommand::class,
             ]);
         }
     }

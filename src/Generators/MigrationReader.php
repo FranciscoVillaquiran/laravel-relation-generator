@@ -52,6 +52,18 @@ class MigrationReader
     }
 
     /**
+     * Read an existing index only when it exactly matches the current migrations.
+     *
+     * @param string|list<string> $migrationPaths
+     */
+    public function analyzeCurrent(string|array $migrationPaths, string $indexPath, string $projectRoot): DatabaseSchema
+    {
+        return (new StructuralSchemaIndex($indexPath, $projectRoot))->analyzeCurrent(
+            $this->migrationFiles($migrationPaths)
+        );
+    }
+
+    /**
      * Obtiene las columnas definidas en una migración.
      */
     public function getColumns(string $migrationPath): array
