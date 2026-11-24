@@ -957,6 +957,17 @@ $test('persists and incrementally refreshes the structural migration index', sta
         $unchangedSchema = $reader->analyze($migrationDirectory, $indexPath);
         assertSameValue(3, $parser->calls);
         assertSameValue($firstSchema->toArray(), $unchangedSchema->toArray());
+        assertSameValue($firstSchema->toArray(), $reader->analyzeCurrent($migrationDirectory, $indexPath, getcwd())->toArray());
+        assertSameValue(3, $parser->calls);
+        assertSameValue($initialIndexJson, file_get_contents($indexPath));
+        try {
+            $reader->analyzeCurrent($migrationDirectory, $deferredIndexPath, getcwd());
+            throw new RuntimeException('Expected an absent structural index to be rejected.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'missing or invalid')) {
+                throw $exception;
+            }
+        }
 
         $alterMigration = $migrationDirectory . DIRECTORY_SEPARATOR . '2026_01_03_000001_alter_users.php';
         $alterContents = file_get_contents($alterMigration);
@@ -968,6 +979,15 @@ $test('persists and incrementally refreshes the structural migration index', sta
         if ($modifiedContents === $alterContents || file_put_contents($alterMigration, $modifiedContents) === false) {
             throw new RuntimeException('Could not modify the migration fixture for the index test.');
         }
+        try {
+            $reader->analyzeCurrent($migrationDirectory, $indexPath, getcwd());
+            throw new RuntimeException('Expected a stale structural index to be rejected.');
+        } catch (RuntimeException $exception) {
+            if (!str_contains($exception->getMessage(), 'Structural index is stale')) {
+                throw $exception;
+            }
+        }
+        assertSameValue($initialIndexJson, file_get_contents($indexPath));
 
         $modifiedSchema = $reader->analyze($migrationDirectory, $indexPath);
         assertSameValue(4, $parser->calls);
@@ -1261,29 +1281,40 @@ PHP;
             $controllersPath . DIRECTORY_SEPARATOR . 'PrivateController.php',
             str_replace('public function destroy()', 'private function destroy()', sprintf($controllerTemplate, 'Private'))
         );
-        try {
-            $generator->generate($projectRoot, ['App\\Models\\Private']);
-            throw new RuntimeException('Expected a controller missing a public action to be rejected.');
-        } catch (RuntimeException $exception) {
-            if (!str_contains($exception->getMessage(), 'missing public actions')) {
-                throw new RuntimeException('Unexpected controller validation result: ' . $exception->getMessage());
-            }
-        }
+        file_put_contents($apiRoutesPath, $apiWithoutUriConflict . "\nRoute::delete('/privates/{private}', fn () => null);\n");
+        $generator->generate($projectRoot, ['App\\Models\\Private']);
+        $partialRoutes = file_get_contents($apiRoutesPath);
+        assertSameValue(true, str_contains($partialRoutes, "PrivateController::class)->only(['index', 'store', 'show', 'update']);"));
+        $generator->generate($projectRoot, ['App\\Models\\Private']);
+        assertSameValue($partialRoutes, file_get_contents($apiRoutesPath));
 
         $disabledRoot = $projectRoot . DIRECTORY_SEPARATOR . 'api-disabled';
         mkdir($disabledRoot . DIRECTORY_SEPARATOR . 'routes', 0777, true);
         mkdir($disabledRoot . DIRECTORY_SEPARATOR . 'bootstrap', 0777, true);
-        file_put_contents($disabledRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php', "<?php\n");
-        file_put_contents($disabledRoot . DIRECTORY_SEPARATOR . 'bootstrap' . DIRECTORY_SEPARATOR . 'app.php', "<?php\nreturn Application::configure()->withRouting(web: 'routes/web.php')->create();");
+        $disabledControllers = $disabledRoot . DIRECTORY_SEPARATOR . 'app' . DIRECTORY_SEPARATOR . 'Http'
+            . DIRECTORY_SEPARATOR . 'Controllers' . DIRECTORY_SEPARATOR . 'Api';
+        mkdir($disabledControllers, 0777, true);
+        $disabledBootstrapFile = $disabledRoot . DIRECTORY_SEPARATOR . 'bootstrap' . DIRECTORY_SEPARATOR . 'app.php';
+        $disabledBootstrap = "<?php\nreturn Application::configure()->withRouting(web: 'routes/web.php', apiPrefix: 'v1')->create();";
+        file_put_contents($disabledBootstrapFile, $disabledBootstrap);
         try {
             $generator->generate($disabledRoot, ['App\\Models\\User']);
-            throw new RuntimeException('Expected an unregistered API routes file to be rejected.');
+            throw new RuntimeException('Expected an absent controller to be rejected.');
         } catch (RuntimeException $exception) {
-            if (!str_contains($exception->getMessage(), 'Could not verify')) {
-                throw new RuntimeException('Unexpected API registration result: ' . $exception->getMessage());
+            if (!str_contains($exception->getMessage(), 'CRUD controller not found')) {
+                throw $exception;
             }
-            assertSameValue(false, file_exists($disabledRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'lrg_api.php'));
         }
+        assertSameValue($disabledBootstrap, file_get_contents($disabledBootstrapFile));
+        assertSameValue(false, file_exists($disabledRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php'));
+        file_put_contents($disabledControllers . DIRECTORY_SEPARATOR . 'UserController.php', sprintf($controllerTemplate, 'User'));
+        $generator->generate($disabledRoot, ['App\\Models\\User']);
+        $preparedBootstrap = file_get_contents($disabledBootstrapFile);
+        assertSameValue(true, str_contains($preparedBootstrap, "apiPrefix: 'v1'"));
+        assertSameValue(true, str_contains($preparedBootstrap, "api: __DIR__ . '/../routes/api.php'"));
+        assertSameValue(true, is_file($disabledRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php'));
+        $generator->generate($disabledRoot, ['App\\Models\\User']);
+        assertSameValue($preparedBootstrap, file_get_contents($disabledBootstrapFile));
 
         $customRoutingRoot = $projectRoot . DIRECTORY_SEPARATOR . 'custom-routing';
         mkdir($customRoutingRoot . DIRECTORY_SEPARATOR . 'routes', 0777, true);
@@ -1291,7 +1322,7 @@ PHP;
         file_put_contents($customRoutingRoot . DIRECTORY_SEPARATOR . 'routes' . DIRECTORY_SEPARATOR . 'api.php', "<?php\n");
         file_put_contents(
             $customRoutingRoot . DIRECTORY_SEPARATOR . 'bootstrap' . DIRECTORY_SEPARATOR . 'app.php',
-            "<?php\nApplication::configure()->withRouting(using: function () {}, api: __DIR__ . '/../routes/api.php');\n"
+            "<?php\nreturn Application::configure()->withRouting(web: 'routes/web.php', using: function () {}, api: __DIR__ . '/../routes/api.php')->create();\n"
         );
         try {
             $generator->generate($customRoutingRoot, ['App\\Models\\User']);
@@ -1311,20 +1342,37 @@ PHP;
         mkdir($providerRoutes, 0777, true);
         mkdir($providerDirectory, 0777, true);
         mkdir($providerControllers, 0777, true);
-        file_put_contents($providerRoutes . DIRECTORY_SEPARATOR . 'api.php', "<?php\n");
         file_put_contents(
             $providerDirectory . DIRECTORY_SEPARATOR . 'RouteServiceProvider.php',
-            "<?php\nRoute::middleware('api')->prefix('api')->group(base_path('routes/api.php'));\n"
+            "<?php\nRoute::middleware('api')->prefix('v3')->group(base_path('routes/api.php'));\n"
         );
         file_put_contents(
             $providerControllers . DIRECTORY_SEPARATOR . 'UserController.php',
             sprintf($controllerTemplate, 'User')
         );
         $generator->generate($providerRoot, ['App\\Models\\User']);
+        assertSameValue(true, is_file($providerRoutes . DIRECTORY_SEPARATOR . 'api.php'));
         assertSameValue(
             false,
             file_exists($providerRoutes . DIRECTORY_SEPARATOR . 'lrg_api.php')
         );
+        $providerFile = $providerDirectory . DIRECTORY_SEPARATOR . 'RouteServiceProvider.php';
+        file_put_contents($providerFile, <<<'PHP'
+<?php
+use Illuminate\Support\Facades\Route;
+class RouteServiceProvider {
+    public function boot() {
+        $this->routes(function () {
+            Route::middleware('web')->group(base_path('routes/web.php'));
+        });
+    }
+}
+PHP);
+        $generator->generate($providerRoot, ['App\\Models\\User']);
+        $preparedProvider = file_get_contents($providerFile);
+        assertSameValue(true, str_contains($preparedProvider, "->prefix('api')->group(base_path('routes/api.php'))"));
+        $generator->generate($providerRoot, ['App\\Models\\User']);
+        assertSameValue($preparedProvider, file_get_contents($providerFile));
     } finally {
         foreach (glob($controllersPath . DIRECTORY_SEPARATOR . '*.php') ?: [] as $controller) {
             unlink($controller);
@@ -1362,6 +1410,15 @@ PHP;
         }
         if (is_dir($disabledBootstrap)) {
             rmdir($disabledBootstrap);
+        }
+        if (isset($disabledControllers)) {
+            unlink($disabledControllers . DIRECTORY_SEPARATOR . 'UserController.php');
+            foreach ([$disabledControllers, dirname($disabledControllers), dirname(dirname($disabledControllers)),
+                dirname(dirname(dirname($disabledControllers))), $disabledRoot . DIRECTORY_SEPARATOR . 'app'] as $directory) {
+                if (is_dir($directory)) {
+                    rmdir($directory);
+                }
+            }
         }
         if (is_dir(dirname($disabledRoutes))) {
             rmdir(dirname($disabledRoutes));

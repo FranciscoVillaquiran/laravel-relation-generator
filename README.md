@@ -46,6 +46,7 @@ database-error handling; Eloquent and the database retain their normal behavior.
 
 Generation is prepared in temporary copies, then applied with recoverable
 backups. If validation, a write, schema verification, or index update fails,
+or the generated API routes cannot be verified in a fresh Laravel process,
 LRG restores the previous project files. The structural index
 `.lrg/lrg-index.json` is updated only after generation succeeds.
 
@@ -95,8 +96,26 @@ The command writes managed `Route::apiResource()` declarations directly into a
 marked block in `routes/api.php`. When upgrading from an earlier release, it
 migrates the old managed routes and manual routes from `routes/lrg_api.php`
 into `routes/api.php`, then removes the obsolete file. It preserves unrelated
-routes and `routes/web.php`. Laravel must already load `routes/api.php`;
-configurations that cannot be verified are rejected.
+routes and `routes/web.php`. If `routes/api.php` is missing, LRG creates it.
+In a recognizable Laravel 11+ application
+builder, LRG also adds the missing `api` argument to `withRouting` and preserves
+an explicit `apiPrefix`. A conventional Laravel 10 API group is recognized;
+an unambiguous web-only provider callback can be extended with the API group.
+Other routing configurations are rejected rather
+than edited speculatively. No Sanctum installation is required.
+
+Before committing, `relation:make --api` runs `artisan route:list --json` in a
+fresh process and checks each managed CRUD and association route. A stale route cache
+can prevent verification; run `php artisan route:clear` and retry. This
+verifies registration, not HTTP accessibility. The reusable
+`RegisteredApiRouteInspector::inspect($projectRoot)` returns the actual route
+inventory described in the project guide.
+
+The internal `Frontend\MetadataGenerator` can build a deterministic version
+2.0 frontend metadata contract from a current structural index, unchanged LRG
+controllers and registered routes. It does not write to the frontend. The
+packaged template validates both 1.0 and 2.0; see
+the [contract documentation](docs/REACT_ADAPTER_CONTRACT.md) before consuming it.
 
 For an N:M relation generated with `--crud --api`, the first model's controller
 owns the assignment. Its create and update endpoints accept `related_ids` as
@@ -137,3 +156,24 @@ controller.
 For the detailed architecture, command flow, generated files, current
 limitations, and possible next increments, see
 [the project guide](docs/PROJECT_GUIDE.md).
+
+The React adapter and its versioned integration contracts are
+documented in [the React adapter contract](docs/REACT_ADAPTER_CONTRACT.md).
+An independent [React template demonstration](templates/react/README.md)
+is available. Install it into an existing sibling React/Vite project with:
+
+```bash
+php artisan lrg:frontend:template --path=../frontend
+```
+
+The command previews its changes and asks for confirmation. It recognizes only
+unmodified supported Vite starter entry points, checks installed dependencies,
+and refuses conflicts. It does not install npm packages or connect to Laravel.
+Connect or resynchronize the installed template after preparing the backend:
+
+```bash
+php artisan lrg:frontend:connect --path=../frontend
+```
+
+See the [installation and connection guide](templates/react/README.md) for
+the complete workflow, supported configurations, rollback and limitations.

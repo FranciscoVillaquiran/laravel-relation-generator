@@ -86,6 +86,45 @@ class StructuralSchemaIndex
         return $schema;
     }
 
+    /** @param list<string> $migrationFiles */
+    public function analyzeCurrent(array $migrationFiles): DatabaseSchema
+    {
+        $index = $this->readIndex();
+        if ($index === null) {
+            throw new RuntimeException("Structural index is missing or invalid: {$this->indexPath}. Regenerate it before exporting metadata.");
+        }
+        $entries = $index['migrations'];
+        if (count($entries) !== count($migrationFiles)) {
+            throw new RuntimeException('Structural index is stale: the migration file list has changed.');
+        }
+        $operations = [];
+        foreach ($migrationFiles as $position => $file) {
+            $entry = $entries[$position];
+            $hash = hash_file('sha256', $file);
+            if ($hash === false || $entry['path'] !== $this->migrationIdentity($file)
+                || !hash_equals($entry['sha256'], $hash)) {
+                throw new RuntimeException("Structural index is stale for migration: {$file}");
+            }
+            foreach ($entry['operations'] as $operation) {
+                $operation['file'] = $file;
+                $operations[] = $operation;
+            }
+        }
+        $schema = (new SchemaBuilder())->build($operations, $migrationFiles);
+        $data = $schema->toArray();
+        $data['migration_files'] = array_map(fn (string $file): string => $this->migrationIdentity($file), $migrationFiles);
+        if ($data !== $index['schema']) {
+            throw new RuntimeException('Structural index schema does not match its migration operations.');
+        }
+        foreach ($migrationFiles as $position => $file) {
+            $hash = hash_file('sha256', $file);
+            if ($hash === false || !hash_equals($entries[$position]['sha256'], $hash)) {
+                throw new RuntimeException("Migration changed during metadata generation: {$file}");
+            }
+        }
+        return $schema;
+    }
+
     private function readIndex(): ?array
     {
         if (!is_file($this->indexPath)) {

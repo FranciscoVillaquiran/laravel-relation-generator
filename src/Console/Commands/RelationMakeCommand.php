@@ -9,6 +9,7 @@ use Franciscovillaquiran\LaravelRelationGenerator\Generators\MigrationReader;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\FillableGenerator;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\CrudGenerator;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\FileChangeTransaction;
+use Franciscovillaquiran\LaravelRelationGenerator\Generators\RegisteredApiRouteInspector;
 use Franciscovillaquiran\LaravelRelationGenerator\Generators\StructuralSchema\DatabaseSchema;
 use Franciscovillaquiran\LaravelRelationGenerator\Relations\RelationDefinition;
 use Illuminate\Console\Command;
@@ -129,6 +130,9 @@ class RelationMakeCommand extends Command
                         'The structural index did not match the schema used for generation.'
                     );
                 }
+            }
+            if ($api) {
+                (new RegisteredApiRouteInspector())->inspect(base_path());
             }
             $transaction->commit();
 

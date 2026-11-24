@@ -10,6 +10,37 @@ use Illuminate\Support\Str;
 
 class RelationshipGenerator
 {
+    /**
+     * Verify the exact generated methods without executing application code.
+     *
+     * @return array{relationA: string, relationB: string}|null
+     */
+    public function inspectSchemaMethods(
+        RelationDefinition $definition,
+        SchemaRelation $relation,
+        DatabaseSchema $schema,
+        string $modelsPath
+    ): ?array {
+        [$pathA, $pathB] = $this->modelPaths($definition, $modelsPath);
+        [$methodA, $methodB, $names] = $this->buildSchemaMethods(
+            $definition,
+            $relation,
+            $schema,
+            (string) $definition->modelATable,
+            (string) $definition->modelBTable
+        );
+        $editor = new ModelSourceEditor();
+        $missingA = $editor->prepareMethods($pathA, [$methodA], $this->modelBasename($definition->modelA)) !== null;
+        $missingB = $editor->prepareMethods($pathB, [$methodB], $this->modelBasename($definition->modelB)) !== null;
+        if ($missingA && $missingB) {
+            return null;
+        }
+        if ($missingA || $missingB) {
+            throw new \RuntimeException("The generated relationship between {$definition->modelA} and {$definition->modelB} is incomplete.");
+        }
+        return $names;
+    }
+
     public function relationNames(RelationDefinition $definition): array
     {
         $modelA = Str::camel($this->modelBasename($definition->modelA));
